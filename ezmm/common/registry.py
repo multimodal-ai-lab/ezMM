@@ -2,9 +2,9 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from ezmm.common.items import Item, ITEM_CLASSES, KIND2ITEM
 from ezmm.config import temp_dir
 from ezmm.util import parse_ref, normalize_path
-from ezmm.common.items import Item, ITEM_CLASSES, KIND2ITEM
 
 
 class ItemRegistry:
@@ -38,10 +38,12 @@ class ItemRegistry:
             self.cur.execute(stmt)
         self.conn.commit()
 
-    def get(self, reference: str) -> Optional[Item]:
+    def get(self, reference: str = None, kind: str = None, identifier: int = None) -> Optional[Item]:
         """Gets the referenced item object by loading it from the cache or,
         if not in the cache, from the disk."""
-        kind, identifier = parse_ref(reference)
+        if kind is None or identifier is None:
+            assert reference
+            kind, identifier = parse_ref(reference)
 
         # Read from cache
         item = self._get_cached(kind, identifier)
@@ -52,21 +54,36 @@ class ItemRegistry:
 
         return item
 
+    def get_by_path(self, kind: str, path: Path | str) -> Optional[Item]:
+        """Returns the item object located at the path ONLY IF it is
+        already registered in the registry."""
+        identifier = self._get_id_by_path(kind, path)
+        if identifier is not None:
+            return self.get(kind=kind, identifier=identifier)
+
     def add_and_assign_id(self, item: Item):
         """Adds a (partially initialized) item to the registry, if not yet registered.
-        Assigns an ID to the item in that case."""
+        Assigns a proper ID to the item and adds it to the cache."""
         if not self.contains(item.kind, item.file_path):
             item.id = self._insert_into_registry(item.file_path, item.kind)
-            self._add_to_cache(item)
         else:
             item.id = self._get_id_by_path(item.kind, item.file_path)
+        self._add_to_cache(item)
+
+    def get_cached(self, reference: str = None, kind: str = None, file_path: Path | str= None) -> Optional[Item]:
+        if reference:
+            kind, identifier = parse_ref(reference)
+        else:
+            assert kind is not None
+            identifier = self._get_id_by_path(kind, file_path)
+        return self._get_cached(kind, identifier)
 
     def _initialize_item(self, kind: str, identifier: int) -> Optional[Item]:
         """Initializes the specified item if it is known to the registry."""
         item_path = self._get_path_by_id(kind, identifier)
         if item_path is not None and item_path.exists():
             item_cls = KIND2ITEM[kind]
-            return item_cls(item_path=item_path)
+            return item_cls(file_path=item_path)
 
     def _get_id_by_path(self, kind: str, item_path: Path) -> Optional[int]:
         stmt = f"""

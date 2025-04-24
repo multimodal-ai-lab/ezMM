@@ -12,25 +12,23 @@ class Item(ABC):
     id: int  # Unique identifier of this item within its kind
     file_path: Path  # The path to the file where the data of this item is stored
 
-    def __new__(cls, *args, reference: str = None, **kwargs):
+    def __new__(cls, file_path: Path | str = None, reference: str = None, **kwargs):
         """Checks if there already exists an instance of the item with the given reference.
         If yes, returns the existing reference. Otherwise, instantiates a new one."""
-        if reference:
-            # Catch cases where the reference consists of only the ID
-            if str(reference).isdigit():
-                reference = f"<{cls.kind}:{reference}>"
 
+        if file_path or reference:
             # Look up an existing instance instead of creating a new one
             from ezmm.common.registry import item_registry
-            item = item_registry.get(reference)
-            if not item:
-                raise ValueError(f"No item with reference {reference}.")
-            return item
-        else:
-            return super().__new__(cls)
+            item = item_registry.get_cached(reference=reference, kind=cls.kind, file_path=file_path)
+            if item:
+                return item
+            elif reference:
+                raise ValueError(f"No item with reference '{reference}'.")
+
+        return super().__new__(cls)
 
     def __init__(self, file_path: Path | str, reference: str = None):
-        if reference:
+        if hasattr(self, "id"):
             # The item is already initialized (existing instance returned via __new__())
             return
         self.file_path = Path(file_path)
@@ -41,8 +39,16 @@ class Item(ABC):
     def reference(self):
         return f"<{self.kind}:{self.id}>"
 
+    def _same(self, other):
+        """Compares the content data with the other item for equality."""
+        raise NotImplementedError
+
     def __eq__(self, other):
-        return isinstance(other, Item) and self.kind == other.kind and self.id == other.id
+        return (self is other or
+                isinstance(other, Item) and (
+                        self.kind == other.kind and self.id == other.id or  # Should never trigger
+                        self._same(other)
+                ))
 
     def __hash__(self):
         return hash((self.kind, self.id))

@@ -4,7 +4,6 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
-import numpy as np
 from PIL.Image import Image as PillowImage, open as pillow_open
 
 from ezmm.common.items.item import Item
@@ -24,7 +23,7 @@ class Image(Item):
                  reference: str = None):
         assert file_path or pillow_image or binary_data or reference
 
-        if reference:
+        if hasattr(self, "id"):
             # The image is already initialized (existing instance returned via __new__())
             return
 
@@ -61,11 +60,12 @@ class Image(Item):
     def height(self) -> int:
         return self.image.height
 
-    def __hash__(self):
-        return hash(self.image.tobytes())
-
-    def __eq__(self, other):
-        return isinstance(other, Image) and np.array_equal(np.array(self.image), np.array(other.image))
+    def _same(self, other):
+        return (
+                self.image.mode == other.image.mode and
+                self.image.size == other.image.size and
+                self.image.tobytes() == other.image.tobytes()
+        )
 
 
 def _ensure_rgb_mode(pillow_image: PillowImage) -> PillowImage:

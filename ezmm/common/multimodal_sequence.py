@@ -67,3 +67,9 @@ class MultimodalSequence:
 
     def __getitem__(self, index):
         return self.data[index]
+
+    def __eq__(self, other):
+        return isinstance(other, MultimodalSequence) and self.data == other.data
+
+    def __hash__(self):
+        return hash(str(self))
