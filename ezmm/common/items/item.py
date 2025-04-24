@@ -6,6 +6,9 @@ from typing import Sequence
 from ezmm.util import is_item_ref
 
 
+REF = "<{kind}:{id}>"  # General reference template, defining the reference syntax
+
+
 class Item(ABC):
     """An element of MultimodalSequences. The data of each item is saved in an individual file."""
     kind: str  # Specifies the type of the item (image, video, ...)
@@ -37,7 +40,7 @@ class Item(ABC):
 
     @property
     def reference(self):
-        return f"<{self.kind}:{self.id}>"
+        return REF.format(kind=self.kind, id=self.id)
 
     def _same(self, other):
         """Compares the content data with the other item for equality."""
@@ -74,7 +77,8 @@ def resolve_references_from_string(string: str) -> list[str | Item]:
     strings and items."""
     from ezmm.common.registry import item_registry
     from ezmm.common.items import ITEM_REF_REGEX
-    split = re.split(ITEM_REF_REGEX, string)
+    ref_regex = rf"\s?{ITEM_REF_REGEX}\s?"  # Extend to optional whitespaces before and after the ref
+    split = re.split(ref_regex, string)
     # Replace each reference with its actual item object
     for i in range(len(split)):
         substr = split[i]

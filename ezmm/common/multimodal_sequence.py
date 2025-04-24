@@ -9,7 +9,6 @@ class MultimodalSequence:
     non-verbalizable element is referenced in-place, e.g., `<image:0>` for image
     with ID 0."""
     data: list[str | Item]
-    string: str
 
     def __init__(self, *args: str | Item | Sequence[str | Item]):
         data = args[0] if len(args) == 1 else list(args)

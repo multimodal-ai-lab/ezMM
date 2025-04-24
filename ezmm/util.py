@@ -26,8 +26,8 @@ def parse_ref(ref: str) -> (str, int):
 
 def parse_item_ref(reference: str) -> Optional[tuple[str, int]]:
     """Returns the first matching kind and identifier from the reference."""
-    from ezmm.common.items import ITEM_KIND_REGEX
-    pattern = re.compile(ITEM_KIND_REGEX, re.DOTALL)
+    from ezmm.common.items import ITEM_KIND_ID_REGEX
+    pattern = re.compile(ITEM_KIND_ID_REGEX, re.DOTALL)
     result = pattern.findall(reference)
     if len(result) > 0:
         match = result[0]
