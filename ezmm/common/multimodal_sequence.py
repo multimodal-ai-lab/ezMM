@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Sequence
 
 from ezmm.common.items import Image, Audio, Video
@@ -10,10 +12,12 @@ class MultimodalSequence:
     with ID 0."""
     data: list[str | Item]
 
-    def __init__(self, *args: str | Item | Sequence[str | Item]):
+    def __init__(self, *args: str | Item | MultimodalSequence | Sequence[str | Item]):
         data = args[0] if len(args) == 1 else list(args)
         if isinstance(data, (str, Item)):
             data = [data]
+        elif isinstance(data, MultimodalSequence):
+            data = data.data
         self.data = resolve_references_from_sequence(data)
 
     @property
@@ -55,8 +59,7 @@ class MultimodalSequence:
         return " ".join(substrings)
 
     def __repr__(self):
-        return (f"MultimodalSequence(len={len(self.__str__())}, n_images={len(self.images)}, "
-                f"n_videos={len(self.videos)}, n_audios={len(self.audios)})")
+        return f"MultimodalSequence(str_len={len(self.__str__())}, n_items={len(self.data)})"
 
     def __iter__(self):
         return iter(self.data)
