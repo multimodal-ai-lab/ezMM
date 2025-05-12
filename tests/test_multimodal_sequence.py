@@ -36,3 +36,32 @@ def test_list_comprehension():
     assert seq[0] == "The image"
     assert seq[1] == img
     assert seq[2] == "shows two beautiful roses."
+
+
+def test_empty():
+    seq0 = MultimodalSequence()
+    seq1 = MultimodalSequence("")
+    seq2 = MultimodalSequence(" ")
+    seq3 = MultimodalSequence([])
+    seq4 = MultimodalSequence(None)
+    seq5 = MultimodalSequence([None])
+    assert seq0 == seq1 == seq2 == seq3 == seq4 == seq5
+
+
+def test_bool_false():
+    seq0 = MultimodalSequence()
+    seq1 = MultimodalSequence(None)
+    seq2 = MultimodalSequence([])
+    seq3 = MultimodalSequence("")
+    seq4 = MultimodalSequence(None, None)
+    assert not seq0
+    assert not seq1
+    assert not seq2
+    assert not seq3
+    assert not seq4
+
+def test_bool_true():
+    seq0 = MultimodalSequence("This is just some text.")
+    seq1 = MultimodalSequence("The image", Image("in/roses.jpg"), "shows two beautiful roses.")
+    assert seq0
+    assert seq1

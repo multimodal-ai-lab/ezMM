@@ -1,10 +1,11 @@
 import re
 from abc import ABC
 from pathlib import Path
+from shutil import copyfile
 from typing import Sequence
 
+from ezmm.config import temp_dir
 from ezmm.util import is_item_ref
-
 
 REF = "<{kind}:{id}>"  # General reference template, defining the reference syntax
 
@@ -46,6 +47,24 @@ class Item(ABC):
         """Compares the content data with the other item for equality."""
         raise NotImplementedError
 
+    @staticmethod
+    def from_reference(reference: str):
+        from ezmm.common.registry import item_registry
+        return item_registry.get(reference)
+
+    def relocate(self):
+        """Saves the item's file to the temp_dir if not
+        located there already."""
+        new_filename = str(self.id) + self.file_path.suffix
+        new_path = temp_dir / self.kind / new_filename
+        if self.file_path != new_path:
+            # Ensure the target directory exists
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            # Copy file to temp directory
+            copyfile(self.file_path, new_path)
+            # Update the file path to the new location
+            self.file_path = new_path
+
     def __eq__(self, other):
         return (self is other or
                 isinstance(other, Item) and (
@@ -64,9 +83,10 @@ def resolve_references_from_sequence(seq: Sequence[str | Item]) -> list[str | It
     processed = []
     for item in seq:
         if isinstance(item, str):
-            resolved = resolve_references_from_string(item)
-            processed.extend(resolved)
-        else:
+            if item.strip():  # Drop de-facto-empty strings
+                resolved = resolve_references_from_string(item)
+                processed.extend(resolved)
+        elif item:  # Drop Nones
             processed.append(item)
     return processed
 

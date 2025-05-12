@@ -1,6 +1,4 @@
 import base64
-# import warnings
-from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -8,9 +6,6 @@ from PIL.Image import Image as PillowImage, open as pillow_open
 
 from ezmm.common.items.item import Item
 from ezmm.config import items_dir
-
-
-# warnings.simplefilter("ignore")  # hide all warnings
 
 
 class Image(Item):
@@ -33,7 +28,7 @@ class Image(Item):
         if pillow_image is not None:
             pillow_image = _ensure_rgb_mode(pillow_image)
             # Save the image in a temporary folder
-            file_path = items_dir / (datetime.now().strftime("%Y-%m-%d_%H-%M-%s-%f") + ".jpg")
+            file_path = items_dir / self.kind / f"{self.id}.jpg"
             file_path.parent.mkdir(parents=True, exist_ok=True)
             pillow_image.save(file_path)
 

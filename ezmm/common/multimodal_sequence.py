@@ -12,13 +12,13 @@ class MultimodalSequence:
     with ID 0."""
     data: list[str | Item]
 
-    def __init__(self, *args: str | Item | MultimodalSequence | Sequence[str | Item]):
+    def __init__(self, *args: str | Item | MultimodalSequence | Sequence[str | Item | None] | None):
         data = args[0] if len(args) == 1 else list(args)
         if isinstance(data, (str, Item)):
             data = [data]
         elif isinstance(data, MultimodalSequence):
             data = data.data
-        self.data = resolve_references_from_sequence(data)
+        self.data = resolve_references_from_sequence(data) if data else []
 
     @property
     def images(self) -> list[Image]:
@@ -75,3 +75,6 @@ class MultimodalSequence:
 
     def __hash__(self):
         return hash(str(self))
+
+    def __bool__(self):
+        return len(self) > 0
