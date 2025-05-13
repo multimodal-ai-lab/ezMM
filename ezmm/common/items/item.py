@@ -1,7 +1,8 @@
 import re
 from abc import ABC
+from datetime import datetime
 from pathlib import Path
-from shutil import copyfile
+from shutil import copyfile, move
 from typing import Sequence
 
 from ezmm.config import temp_dir
@@ -52,18 +53,29 @@ class Item(ABC):
         from ezmm.common.registry import item_registry
         return item_registry.get(reference)
 
-    def relocate(self):
-        """Saves the item's file to the temp_dir if not
-        located there already."""
-        new_filename = str(self.id) + self.file_path.suffix
-        new_path = temp_dir / self.kind / new_filename
+    def relocate(self, move_not_copy=False):
+        """Copies the item's file to the temp_dir if not
+        located there already. Moves it instead if move=True."""
+        new_path = self._default_file_path(suffix=self.file_path.suffix)
         if self.file_path != new_path:
             # Ensure the target directory exists
             new_path.parent.mkdir(parents=True, exist_ok=True)
-            # Copy file to temp directory
-            copyfile(self.file_path, new_path)
+            # Move/copy file to target directory
+            move(self.file_path, new_path) if move_not_copy else copyfile(self.file_path, new_path)
             # Update the file path to the new location
             self.file_path = new_path
+            from ezmm.common.registry import item_registry
+            item_registry.update_file_path(self)
+
+    def _temp_file_path(self, suffix: str = ""):
+        """Used when the item's ID is not set yet."""
+        filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f") + suffix
+        return temp_dir / "items" / filename
+
+    def _default_file_path(self, suffix: str = ""):
+        """Only usable after item initialization."""
+        default_filename = str(self.id) + suffix
+        return temp_dir / self.kind / default_filename
 
     def __eq__(self, other):
         return (self is other or

@@ -121,6 +121,16 @@ class ItemRegistry:
         self.conn.commit()
         return self._get_id_by_path(kind, item_path)
 
+    def update_file_path(self, item: Item):
+        """Updates the path for the corresponding item in the registry."""
+        stmt = f"""
+            UPDATE {item.kind}
+            SET path = ?
+            WHERE id = ?;
+        """
+        self.cur.execute(stmt, (normalize_path(item.file_path), item.id))
+        self.conn.commit()
+
     def contains(self, kind: str, item_path: Path | str) -> bool:
         return self._get_id_by_path(kind, item_path) is not None
 

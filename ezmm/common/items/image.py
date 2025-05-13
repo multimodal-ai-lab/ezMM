@@ -28,7 +28,7 @@ class Image(Item):
         if pillow_image is not None:
             pillow_image = _ensure_rgb_mode(pillow_image)
             # Save the image in a temporary folder
-            file_path = items_dir / self.kind / f"{self.id}.jpg"
+            file_path = self._temp_file_path(suffix=".jpg")
             file_path.parent.mkdir(parents=True, exist_ok=True)
             pillow_image.save(file_path)
 

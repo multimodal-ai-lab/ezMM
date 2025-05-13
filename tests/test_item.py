@@ -1,3 +1,7 @@
+from importlib.util import source_hash
+from pathlib import Path
+from shutil import copyfile
+
 from ezmm import Image, Item
 
 
@@ -38,14 +42,28 @@ def test_from_reference():
     assert img1 is img2
 
 
-def test_relocate():
+def test_relocate_copy():
     img1 = Image("in/roses.jpg")
     img1.relocate()
     new_filepath = img1.file_path.as_posix()
     assert "in/roses.jpg" not in new_filepath
     assert new_filepath.endswith(f"image/{img1.id}.jpg")
 
-    # Original image file should still exist, but loading it
-    # should return the one saved in temp
+    # Loading the original image file should result in an equal but
+    # different Image object
     img2 = Image("in/roses.jpg")
-    assert img1 is img2
+    assert img1 == img2
+    assert img1 is not img2
+
+
+def test_relocate_move():
+    # Create temp image file from existing
+    source_path = Path("in/roses_copy.jpg")
+    copyfile("in/roses.jpg", source_path)
+
+    img = Image(source_path)
+    img.relocate(move_not_copy=True)
+    new_filepath = img.file_path.as_posix()
+    assert "in/roses.jpg" not in new_filepath
+    assert new_filepath.endswith(f"image/{img.id}.jpg")
+    assert not source_path.exists()
