@@ -3,10 +3,11 @@ from pathlib import Path
 from typing import Optional
 
 
-def normalize_path(path: Path | str) -> str:
-    """Converts the path into a POSIX string representation of the absolute path."""
-    path = Path(path)
-    return path.absolute().as_posix()
+def normalize_path(path: Path | str) -> Path:
+    """Ensures the path is a Path object and relative to the current working directory."""
+    path = Path(path).absolute()
+    cwd = Path.cwd()
+    return path.relative_to(cwd)
 
 
 def get_item_refs(text: str) -> list[str]:

@@ -1,4 +1,3 @@
-from importlib.util import source_hash
 from pathlib import Path
 from shutil import copyfile
 
@@ -40,6 +39,18 @@ def test_from_reference():
     img2 = Item.from_reference(img1.reference)
     assert img1 == img2
     assert img1 is img2
+
+
+def test_source_default():
+    img_path = Path("in/roses.jpg")
+    img = Image(img_path)
+    assert img_path.absolute().as_uri() == img.source_url
+
+
+def test_source_custom():
+    img_path = Path("in/roses.jpg")
+    img = Image(img_path, source_url="https://example.com/image.jpg")
+    assert "https://example.com/image.jpg" == img.source_url
 
 
 def test_relocate_copy():

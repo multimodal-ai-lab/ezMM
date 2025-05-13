@@ -12,28 +12,36 @@ class ItemRegistry:
     Also holds a cache of already loaded items for efficiency."""
     db_path = Path(temp_dir) / "item_registry.db"
 
+    conn: Optional[sqlite3.Connection] = None
+    cur: Optional[sqlite3.Cursor] = None
+    cache: dict[tuple[str, int], Item] = dict()
+
     def __init__(self):
+        self.connect()
+
+    def connect(self):
         # Initialize folder, DB, and cache
         if not self.db_path.parent.exists():
             self.db_path.parent.mkdir(exist_ok=True, parents=True)
-        is_new = not self.db_path.exists()
         self.conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.cur = self.conn.cursor()
-        if is_new:
-            self._init_db()
-        self.cache: dict[tuple[str, int], Item] = dict()
+        self._init_db()
 
     def _init_db(self):
         """Initializes a clean, new DB."""
         for item_cls in ITEM_CLASSES:
             kind = item_cls.kind
             stmt = f"""
-                CREATE TABLE {kind}(id INTEGER PRIMARY KEY, path TEXT);
+                CREATE TABLE IF NOT EXISTS  {kind} (
+                    id INTEGER PRIMARY KEY,
+                    path TEXT NOT NULL UNIQUE,
+                    source_url TEXT NOT NULL
+                );
             """
             self.cur.execute(stmt)
             stmt = f"""
-                CREATE UNIQUE INDEX {kind}_path_idx ON {kind}(path);
+                CREATE UNIQUE INDEX IF NOT EXISTS {kind}_path_idx ON {kind}(path);
             """
             self.cur.execute(stmt)
         self.conn.commit()
@@ -49,8 +57,8 @@ class ItemRegistry:
         item = self._get_cached(kind, identifier)
 
         if item is None:
-            # Initialize new item object
-            item = self._initialize_item(kind, identifier)
+            # Initialize new item object from DB
+            item = self._get_item_by_id(kind, identifier)
 
         return item
 
@@ -65,7 +73,7 @@ class ItemRegistry:
         """Adds a (partially initialized) item to the registry, if not yet registered.
         Assigns a proper ID to the item and adds it to the cache."""
         if not self.contains(item.kind, item.file_path):
-            item.id = self._insert_into_registry(item.file_path, item.kind)
+            item.id = self._insert_into_registry(item, item.kind)
         else:
             item.id = self._get_id_by_path(item.kind, item.file_path)
         self._add_to_cache(item)
@@ -78,48 +86,44 @@ class ItemRegistry:
             identifier = self._get_id_by_path(kind, file_path)
         return self._get_cached(kind, identifier)
 
-    def _initialize_item(self, kind: str, identifier: int) -> Optional[Item]:
-        """Initializes the specified item if it is known to the registry."""
-        item_path = self._get_path_by_id(kind, identifier)
-        if item_path is not None and item_path.exists():
-            item_cls = KIND2ITEM[kind]
-            return item_cls(file_path=item_path)
-
     def _get_id_by_path(self, kind: str, item_path: Path) -> Optional[int]:
+        item_path = normalize_path(item_path)
         stmt = f"""
             SELECT id
             FROM {kind}
             WHERE path = ?;
         """
-        response = self.cur.execute(stmt, (normalize_path(item_path),))
+        response = self.cur.execute(stmt, (item_path.as_posix(),))
         result = response.fetchone()
         if result is not None:
             return result[0]
         else:
             return None
 
-    def _get_path_by_id(self, kind: str, identifier: int) -> Optional[Path]:
+    def _get_item_by_id(self, kind: str, identifier: int) -> Optional[Item]:
         stmt = f"""
-            SELECT path
+            SELECT path, source_url
             FROM {kind}
             WHERE id = ?;
         """
         response = self.cur.execute(stmt, (identifier,))
-        result = response.fetchone()
-        if result is not None:
-            return Path(result[0])
-        else:
-            return None
+        if result := response.fetchone():
+            item_cls = KIND2ITEM[kind]
+            return item_cls(file_path=Path(result[0]),
+                            source_url=result[1])
 
-    def _insert_into_registry(self, item_path: Path, kind: str) -> int:
+    def _insert_into_registry(self, item: Item, kind: str) -> int:
         """Adds the new item directly to the database and returns its assigned ID."""
         stmt = f"""
-            INSERT INTO {kind}(path)
-            VALUES (?);
+            INSERT INTO {kind}(path, source_url)
+            VALUES (?, ?);
         """
-        self.cur.execute(stmt, (normalize_path(item_path),))
+        self.cur.execute(stmt, (item.file_path.as_posix(), item.source_url))
         self.conn.commit()
-        return self._get_id_by_path(kind, item_path)
+
+        stmt = """SELECT last_insert_rowid();"""
+        response = self.cur.execute(stmt)
+        return response.fetchone()[0]
 
     def update_file_path(self, item: Item):
         """Updates the path for the corresponding item in the registry."""
@@ -128,7 +132,7 @@ class ItemRegistry:
             SET path = ?
             WHERE id = ?;
         """
-        self.cur.execute(stmt, (normalize_path(item.file_path), item.id))
+        self.cur.execute(stmt, (item.file_path.as_posix(), item.id))
         self.conn.commit()
 
     def contains(self, kind: str, item_path: Path | str) -> bool:
@@ -142,6 +146,16 @@ class ItemRegistry:
     def _add_to_cache(self, item: Item) -> None:
         """Adds the given item to the cache."""
         self.cache[(item.kind, item.id)] = item
+
+    def close(self):
+        self.conn.close()
+        self.conn = None
+
+    def reset(self):
+        if self.conn:
+            self.close()
+        self.cache = dict()
+        self.connect()
 
 
 item_registry = ItemRegistry()

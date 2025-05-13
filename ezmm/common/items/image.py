@@ -1,20 +1,21 @@
 import base64
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 
 from PIL.Image import Image as PillowImage, open as pillow_open
 
 from ezmm.common.items.item import Item
-from ezmm.config import items_dir
 
 
 class Image(Item):
     kind = "image"
-    image: PillowImage
+    _image: Optional[PillowImage] = None
 
     def __init__(self, file_path: str | Path = None,
                  pillow_image: PillowImage = None,
                  binary_data: bytes = None,
+                 source_url: str = None,
                  reference: str = None):
         assert file_path or pillow_image or binary_data or reference
 
@@ -31,16 +32,19 @@ class Image(Item):
             file_path = self._temp_file_path(suffix=".jpg")
             file_path.parent.mkdir(parents=True, exist_ok=True)
             pillow_image.save(file_path)
+            self._image = pillow_image
 
-        super().__init__(file_path, reference=reference)
+        super().__init__(file_path,
+                         source_url=source_url,
+                         reference=reference)
 
-        if pillow_image is not None:
-            self.image = pillow_image
-        else:
-            # Pillow opens images lazily, so actual image read only happens when accessing the image
-            pillow_image = pillow_open(self.file_path)
-            pillow_image = _ensure_rgb_mode(pillow_image)
-            self.image = pillow_image
+    @property
+    def image(self) -> PillowImage:
+        """Lazy-loads the PIL image of this Image item."""
+        if not self._image:
+            image = pillow_open(self.file_path)
+            self._image = _ensure_rgb_mode(image)
+        return self._image
 
     def get_base64_encoded(self) -> str:
         buffered = BytesIO()
@@ -61,6 +65,11 @@ class Image(Item):
                 self.image.size == other.image.size and
                 self.image.tobytes() == other.image.tobytes()
         )
+
+    def close(self):
+        if self._image:
+            self._image.close()
+            self._image = None
 
 
 def _ensure_rgb_mode(pillow_image: PillowImage) -> PillowImage:
