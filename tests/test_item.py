@@ -1,7 +1,10 @@
 from pathlib import Path
 from shutil import copyfile
 
-from ezmm import Image, Item
+import aiohttp
+import pytest
+
+from ezmm import Image, Item, download_item, MultimodalSequence
 
 
 def test_item():
@@ -78,3 +81,15 @@ def test_relocate_move():
     assert "in/roses.jpg" not in new_filepath
     assert new_filepath.endswith(f"image/{img.id}.jpg")
     assert not source_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_download_items():
+    urls = [
+        "https://img.zeit.de/wissen/2025-06/hitzewelle-barcelona-temperaturrekord/wide__1000x562__desktop__scale_2",
+        "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm"
+    ]
+    for url in urls:
+        item = await download_item(url)
+        assert isinstance(item, Item)
+        print(item)

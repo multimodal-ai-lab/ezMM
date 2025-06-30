@@ -3,9 +3,11 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
+import aiohttp
 from PIL.Image import Image as PillowImage, open as pillow_open
 
 from ezmm.common.items.item import Item
+from ezmm.request import request_static
 
 
 class Image(Item):
@@ -78,3 +80,26 @@ def _ensure_rgb_mode(pillow_image: PillowImage) -> PillowImage:
         return pillow_image.convert('RGB')
     else:
         return pillow_image
+
+
+async def download_image(
+        image_url: str,
+        session: aiohttp.ClientSession,
+        any_size: bool = True,
+        max_size: tuple[int, int] = (2048, 2048)
+) -> Optional[Image]:
+    """Download an image from a URL and return it as an Image object."""
+    # TODO: Handle very large images like: https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144225/campfire_oli_2018312_lrg.jpg
+    content = await request_static(image_url, session, get_text=False)
+    if content:
+        pillow_img = pillow_open(BytesIO(content))
+
+        if pillow_img:
+            if pillow_img.width > max_size[0] or pillow_img.height > max_size[1]:
+                pillow_img.thumbnail(max_size, PillowImage.LANCZOS)  # Preserves aspect ratio
+
+            if any_size or (pillow_img.width > 256 and pillow_img.height > 256):
+                # TODO: Check for duplicates, i.e., reuse an existing image if it already exists in the registry
+                image = Image(pillow_image=pillow_img, source_url=image_url)
+                image.relocate(move_not_copy=True)  # Ensure the image is in the temp dir + follows simple naming
+                return image

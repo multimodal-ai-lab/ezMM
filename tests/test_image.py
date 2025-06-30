@@ -1,8 +1,10 @@
+import asyncio
 from shutil import copyfile
 
+import aiohttp
 from PIL import Image as PillowImage
 
-from ezmm import Image, MultimodalSequence
+from ezmm import Image, MultimodalSequence, download_image
 
 
 def test_image_equality():
@@ -32,3 +34,17 @@ def test_binary():
     pillow_img = PillowImage.open("in/tulips.jpg")
     img = Image(pillow_image=pillow_img)
     print(img.file_path)
+
+
+async def download_img(url):
+    async with aiohttp.ClientSession() as session:
+        return await download_image(url, session)
+
+
+def test_download_image():
+    urls = [
+        "https://img.zeit.de/wissen/2025-06/hitzewelle-barcelona-temperaturrekord/wide__1000x562__desktop__scale_2"
+    ]
+    for url in urls:
+        img = asyncio.run(download_img(url))
+        print(img)

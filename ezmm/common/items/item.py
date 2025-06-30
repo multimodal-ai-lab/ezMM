@@ -3,9 +3,12 @@ from abc import ABC
 from datetime import datetime
 from pathlib import Path
 from shutil import copyfile, move
-from typing import Sequence
+from typing import Sequence, Optional
+
+import aiohttp
 
 from ezmm.config import temp_dir
+from ezmm.request import is_maybe_image_url, is_maybe_video_url
 from ezmm.util import is_item_ref, normalize_path
 
 REF = "<{kind}:{id}>"  # General reference template, defining the reference syntax
@@ -44,15 +47,15 @@ class Item(ABC):
         item_registry.add_and_assign_id(self)  # Ensure the item is registered and get an ID assigned
 
     @property
-    def reference(self):
+    def reference(self) -> str:
         return REF.format(kind=self.kind, id=self.id)
 
-    def _same(self, other):
+    def _same(self, other) -> bool:
         """Compares the content data with the other item for equality."""
         raise NotImplementedError
 
     @staticmethod
-    def from_reference(reference: str):
+    def from_reference(reference: str) -> Optional["Item"]:
         from ezmm.common.registry import item_registry
         return item_registry.get(reference)
 
@@ -77,12 +80,12 @@ class Item(ABC):
             from ezmm.common.registry import item_registry
             item_registry.update_file_path(self)
 
-    def _temp_file_path(self, suffix: str = ""):
+    def _temp_file_path(self, suffix: str = "") -> Path:
         """Used when the item's ID is not set yet."""
         filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f") + suffix
         return normalize_path(temp_dir / "items" / filename)
 
-    def _default_file_path(self, suffix: str = ""):
+    def _default_file_path(self, suffix: str = "") -> Path:
         """Only usable after item initialization."""
         default_filename = str(self.id) + suffix
         return normalize_path(temp_dir / self.kind / default_filename)
@@ -130,3 +133,17 @@ def resolve_references_from_string(string: str) -> list[str | Item]:
             if item is not None:
                 split[i] = item
     return split
+
+
+async def download_item(url: str) -> Optional[Item]:
+    """Downloads the item from the given URL and returns an instance of the
+    corresponding item class."""
+
+    async with aiohttp.ClientSession() as session:
+        if await is_maybe_image_url(url, session):
+            from ezmm.common.items.image import download_image
+            return await download_image(url, session)
+        if await is_maybe_video_url(url, session):
+            from ezmm.common.items.video import download_video
+            return await download_video(url, session)
+        # TODO: Handle audios
