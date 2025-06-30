@@ -1,4 +1,4 @@
-from ezmm import MultimodalSequence, Image
+from ezmm import MultimodalSequence, Image, Video
 
 
 def test_multimodal_sequence():
@@ -60,8 +60,20 @@ def test_bool_false():
     assert not seq3
     assert not seq4
 
+
 def test_bool_true():
     seq0 = MultimodalSequence("This is just some text.")
     seq1 = MultimodalSequence("The image", Image("in/roses.jpg"), "shows two beautiful roses.")
     assert seq0
     assert seq1
+
+
+def test_render():
+    seq = MultimodalSequence(
+        "The image",
+        Image("in/roses.jpg"),
+        "shows two beautiful roses while the video",
+        Video("in/mountains.mp4"),
+        "shows a nice mountain view."
+    )
+    seq.render()

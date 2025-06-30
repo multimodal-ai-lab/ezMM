@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sequence {{ seq_id }}</title>
+    <style>
+        .sequence-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .media-container {
+            margin: 20px 0;
+        }
+
+        .media-item {
+            max-width: 100%;
+            height: auto;
+        }
+
+        .sequence-text {
+            font-size: 16px;
+            line-height: 1.5;
+            margin: 20px 0;
+        }
+
+        .back-button {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            text-decoration: none;
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        .back-button:hover {
+            background-color: #e0e0e0;
+        }
+    </style>
+</head>
+<body>
+
+
+<div class="sequence-container">
+    <a href="/" class="back-button">← Back to Overview</a>
+    <h1>Sequence #{{ seq_id }}</h1>
+    {% for item in sequence %}
+        {% if item is string %}
+            <p>{{ item }}</p>
+        {% elif item.kind == 'image' %}
+            <div class="media-container">
+                <img class="media-item" src="{{ '/' + item.file_path.as_posix() }}" alt="{{ item.reference }}">
+            </div>
+        {% elif item.kind == 'video' %}
+            <div class="media-container">
+                <video class="media-item" controls>
+                    <source src="{{ '/' + item.file_path.as_posix() }}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+        {% endif %}
+    {% endfor %}
+</div>
+</body>
+</html>

@@ -4,6 +4,8 @@ from typing import Sequence
 
 from ezmm.common.items import Image, Audio, Video
 from ezmm.common.items.item import Item, resolve_references_from_sequence
+from ezmm.ui.common import SEQ_PATH
+from multiprocessing import Process
 
 
 class MultimodalSequence:
@@ -78,3 +80,22 @@ class MultimodalSequence:
 
     def __bool__(self):
         return len(self) > 0
+
+    def render(self):
+        """Saves the given MultimodalSequence to a .md file in SEQ_PATH to make it
+        viewable through a link in the browser."""
+        # Create sequences directory if it doesn't exist
+        SEQ_PATH.mkdir(parents=True, exist_ok=True)
+
+        # Generate 8-char ID string for the sequence
+        seq_id = str(abs(hash(self)))[:8]
+
+        # Save to file with unique name
+        file_path = SEQ_PATH / f"{seq_id}.md"
+        file_path.write_text(str(self))
+
+        # Start the server
+        from ezmm.ui.main import run_server
+        Process(target=run_server).start()
+
+        print(f"You can view the sequence at http://localhost:8000/sequence/{seq_id}")
