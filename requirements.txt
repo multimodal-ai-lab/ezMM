@@ -1,2 +1,6 @@
 pillow~=11.2.1
-pytest
+pillow-avif-plugin==1.5.1
+pytest~=8.4.1
+pytest-asyncio
+opencv-python~=4.9.0.80
+aiohttp~=3.12.13
