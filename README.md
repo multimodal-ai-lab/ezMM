@@ -38,3 +38,10 @@ You can apply list comprehension to `seq`. For example,
 
 ### Easy modality checks
 You can check for specific modalities like images quickly, e.g., with `seq.has_images()`.
+
+## Feature Overview
+- ✅ Image support
+- ✅ Video support
+- ✅ Saving and organizing media in a database along with their origin URL
+- ✅ Rendering `MultimodalSequence` in a web UI
+- ⏳ Duplication management: Identify and re-use duplicates
