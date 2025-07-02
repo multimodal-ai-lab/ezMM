@@ -2,6 +2,8 @@ from typing import Optional
 
 import aiohttp
 import asyncio
+import certifi
+import ssl
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -9,6 +11,7 @@ HEADERS = {
                   "Chrome/123.0.0.0 Safari/537.36",
 }
 
+ssl_context = ssl.create_default_context(cafile=certifi.where())
 
 async def is_maybe_image_url(url: str, session: aiohttp.ClientSession) -> bool:
     """Returns True iff the URL points at an accessible _pixel_ image file
@@ -47,7 +50,7 @@ async def is_maybe_video_url(url: str, session: aiohttp.ClientSession) -> bool:
 
 
 async def fetch_headers(url, session: aiohttp.ClientSession, **kwargs) -> dict:
-    async with session.head(url, **kwargs) as response:
+    async with session.head(url, ssl=ssl_context, **kwargs) as response:
         response.raise_for_status()
         return dict(response.headers)
 
@@ -63,7 +66,7 @@ async def request_static(url: str,
         url = str(url)
         try:
             async with session.get(url, timeout=10, headers=HEADERS, allow_redirects=True,
-                                   raise_for_status=True, **kwargs) as response:
+                                   raise_for_status=True, ssl=ssl_context, **kwargs) as response:
                 if get_text:
                     return await response.text()  # HTML string
                 else:

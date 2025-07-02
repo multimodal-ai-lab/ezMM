@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from typing import Sequence
+from markdown import markdown
 
 from ezmm.common.items import Image, Audio, Video
 from ezmm.common.items.item import Item, resolve_references_from_sequence
 from ezmm.ui.common import SEQ_PATH
-from multiprocessing import Process
 
 
 class MultimodalSequence:
@@ -46,6 +46,17 @@ class MultimodalSequence:
     def to_list(self):
         return self.data
 
+    def as_html(self) -> str:
+        """Returns the sequence as HTML code."""
+        htmls = []
+        for item in self:
+            if isinstance(item, Item):
+                html = f'<div class="media-container">{item.as_html()}</div>'
+                htmls.append(html)
+            else:
+                htmls.append(markdown(item))
+        return " ".join(htmls)
+
     def unique_items(self) -> set[Item]:
         """Returns the set of all items (not strings) occurring in the sequence."""
         return set([item for item in self if isinstance(item, Item)])
@@ -83,7 +94,9 @@ class MultimodalSequence:
 
     def render(self):
         """Saves the given MultimodalSequence to a .md file in SEQ_PATH to make it
-        viewable through a link in the browser."""
+        viewable through a link in the browser. Starts a server (if not started yet)
+        that serves the UI. If `blocking` is False, the server is started in a separate
+        process."""
         # Create sequences directory if it doesn't exist
         SEQ_PATH.mkdir(parents=True, exist_ok=True)
 
@@ -92,10 +105,9 @@ class MultimodalSequence:
 
         # Save to file with unique name
         file_path = SEQ_PATH / f"{seq_id}.md"
-        file_path.write_text(str(self))
+        file_path.write_text(str(self), encoding="utf-8")
 
         # Start the server
         from ezmm.ui.main import run_server
-        Process(target=run_server).start()
-
-        print(f"You can view the sequence at http://localhost:8000/sequence/{seq_id}")
+        print(f"You can view the sequence at http://localhost:7878/sequence/{seq_id}")
+        run_server()

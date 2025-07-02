@@ -1,3 +1,4 @@
+import asyncio
 import re
 from abc import ABC
 from datetime import datetime
@@ -62,6 +63,10 @@ class Item(ABC):
     def close(self):
         """Closes any resources held by this item."""
         pass
+
+    def as_html(self) -> str:
+        """Returns the item as HTML code."""
+        return f"<p>Item {self.reference} does not support HTML yet.</p>"
 
     def relocate(self, move_not_copy=False):
         """Copies the item's file to the temp_dir if not
@@ -135,15 +140,28 @@ def resolve_references_from_string(string: str) -> list[str | Item]:
     return split
 
 
-async def download_item(url: str) -> Optional[Item]:
+async def download_item(url: str,
+                        session: Optional[aiohttp.ClientSession] = None,
+                        ignore_small_images: bool = True) -> Optional[Item]:
     """Downloads the item from the given URL and returns an instance of the
-    corresponding item class."""
+    corresponding item class. Reuses a session if provided."""
 
-    async with aiohttp.ClientSession() as session:
+    own_session = session is None
+    if own_session:
+        session = aiohttp.ClientSession()
+
+    try:
         if await is_maybe_image_url(url, session):
             from ezmm.common.items.image import download_image
-            return await download_image(url, session)
+            return await download_image(url, ignore_small_images=ignore_small_images, session=session)
         if await is_maybe_video_url(url, session):
             from ezmm.common.items.video import download_video
             return await download_video(url, session)
         # TODO: Handle audios
+    finally:
+        if own_session:
+            await session.close()
+
+if __name__ == "__main__":
+    result = asyncio.run(download_item("https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill"))
+    print(result)

@@ -2,13 +2,17 @@ import base64
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
+import logging
 
 import aiohttp
-from PIL.Image import Image as PillowImage, open as pillow_open
+from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new
+import pillow_avif  # Keep this import for AVIF support
 
 from ezmm.common.items.item import Item
 from ezmm.request import request_static
 
+logger = logging.getLogger("ezMM")
+logger.debug(f"`pillow_avif` v{pillow_avif.__version__} loaded for AVIF image support.")
 
 class Image(Item):
     kind = "image"
@@ -68,6 +72,13 @@ class Image(Item):
                 self.image.tobytes() == other.image.tobytes()
         )
 
+    def as_html(self) -> str:
+        img = f'<img src="/{self.file_path.as_posix()}" alt="{self.reference}">'
+        if self.source_url:
+            return f'<a href="{self.source_url}">{img}</a>'
+        else:
+            return img
+
     def close(self):
         if self._image:
             self._image.close()
@@ -76,6 +87,11 @@ class Image(Item):
 
 def _ensure_rgb_mode(pillow_image: PillowImage) -> PillowImage:
     """Turns any kind of image (incl. PNGs) into RGB mode to make it JPEG-saveable."""
+    if pillow_image.mode in ["RGBA", "P"]:
+        pillow_image = pillow_image.convert('RGBA')
+        converted = pillow_new("RGB", pillow_image.size, (255, 255, 255))
+        converted.paste(pillow_image, mask=pillow_image.split()[3])  # 3 is the alpha channel
+        return converted
     if pillow_image.mode != "RGB":
         return pillow_image.convert('RGB')
     else:
@@ -85,7 +101,7 @@ def _ensure_rgb_mode(pillow_image: PillowImage) -> PillowImage:
 async def download_image(
         image_url: str,
         session: aiohttp.ClientSession,
-        any_size: bool = True,
+        ignore_small_images: bool = True,
         max_size: tuple[int, int] = (2048, 2048)
 ) -> Optional[Image]:
     """Download an image from a URL and return it as an Image object."""
@@ -98,7 +114,7 @@ async def download_image(
             if pillow_img.width > max_size[0] or pillow_img.height > max_size[1]:
                 pillow_img.thumbnail(max_size, PillowImage.LANCZOS)  # Preserves aspect ratio
 
-            if any_size or (pillow_img.width > 256 and pillow_img.height > 256):
+            if not ignore_small_images or (pillow_img.width > 256 and pillow_img.height > 256):
                 # TODO: Check for duplicates, i.e., reuse an existing image if it already exists in the registry
                 image = Image(pillow_image=pillow_img, source_url=image_url)
                 image.relocate(move_not_copy=True)  # Ensure the image is in the temp dir + follows simple naming

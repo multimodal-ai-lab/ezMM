@@ -4,3 +4,8 @@ pytest~=8.4.1
 pytest-asyncio
 opencv-python~=4.9.0.80
 aiohttp~=3.12.13
+uvicorn~=0.35.0
+fastapi~=0.115.14
+starlette~=0.46.2
+Markdown~=3.5.2
+certifi>=2025.6.15

@@ -76,6 +76,9 @@ class Video(Item):
                 self.file_path.read_bytes() == other.file_path.read_bytes()
         )
 
+    def as_html(self) -> str:
+        return f'<video controls src="/{self.file_path.as_posix()}"></video>'
+
     def close(self):
         if self._video:
             self._video.release()

@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>Sequence {{ seq_id }}</title>
+    <link rel="stylesheet" href="/static/style.css">
     <style>
         .sequence-container {
             max-width: 800px;
@@ -10,19 +11,10 @@
             padding: 20px;
         }
 
-        .media-container {
+        .media-container img {
             margin: 20px 0;
-        }
-
-        .media-item {
             max-width: 100%;
             height: auto;
-        }
-
-        .sequence-text {
-            font-size: 16px;
-            line-height: 1.5;
-            margin: 20px 0;
         }
 
         .back-button {
@@ -47,22 +39,7 @@
 <div class="sequence-container">
     <a href="/" class="back-button">← Back to Overview</a>
     <h1>Sequence #{{ seq_id }}</h1>
-    {% for item in sequence %}
-        {% if item is string %}
-            <p>{{ item }}</p>
-        {% elif item.kind == 'image' %}
-            <div class="media-container">
-                <img class="media-item" src="{{ '/' + item.file_path.as_posix() }}" alt="{{ item.reference }}">
-            </div>
-        {% elif item.kind == 'video' %}
-            <div class="media-container">
-                <video class="media-item" controls>
-                    <source src="{{ '/' + item.file_path.as_posix() }}" type="video/mp4">
-                    Your browser does not support the video tag.
-                </video>
-            </div>
-        {% endif %}
-    {% endfor %}
+    {{ sequence.as_html()|safe }}
 </div>
 </body>
 </html>

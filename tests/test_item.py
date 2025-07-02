@@ -1,10 +1,9 @@
 from pathlib import Path
 from shutil import copyfile
 
-import aiohttp
 import pytest
 
-from ezmm import Image, Item, download_item, MultimodalSequence
+from ezmm import Image, Item, download_item
 
 
 def test_item():
