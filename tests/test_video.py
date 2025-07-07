@@ -47,8 +47,12 @@ def test_base64():
 
 
 @pytest.mark.asyncio
-async def test_download_video():
-    url = "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm"
+@pytest.mark.parametrize("url", [
+    "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm",
+    "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8"
+])
+async def test_download_video(url):
     async with aiohttp.ClientSession() as session:
         vid = await download_video(url, session)
         print(vid)
+        assert isinstance(vid, Video)

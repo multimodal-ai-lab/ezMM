@@ -37,12 +37,12 @@ async def is_maybe_video_url(url: str, session: aiohttp.ClientSession) -> bool:
     try:
         headers = await fetch_headers(url, session, timeout=3)
         content_type = headers.get('Content-Type') or headers.get('content-type')
-        if content_type.startswith("video/"):
+        if content_type.startswith("video/") or content_type == "application/vnd.apple.mpegurl":
             # Surely a video
             return True
         else:
-            # If the content is a binary download stream, it may encode an image
-            # but also something else. This is a case of "maybe an image"
+            # If the content is a binary download stream, it may encode a video
+            # but also something else. This is a case of "maybe a video"
             return content_type == "binary/octet-stream"
 
     except Exception:

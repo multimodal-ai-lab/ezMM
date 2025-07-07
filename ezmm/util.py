@@ -1,6 +1,9 @@
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
+import imageio_ffmpeg as ffmpeg
 
 
 def normalize_path(path: Path | str) -> Path:
@@ -52,3 +55,38 @@ def validate_references(text: str) -> bool:
         if item_registry.get(ref) is None:
             return False
     return True
+
+
+def ts_to_mp4(ts_bytes: bytes) -> bytes:
+    """Converts a TS video (bytes) to MP4 (bytes) using FFmpeg with temporary files."""
+    with tempfile.NamedTemporaryFile(suffix='.ts', delete=False) as temp_ts_file:
+        temp_ts_file.write(ts_bytes)
+        temp_ts_path = Path(temp_ts_file.name)
+
+    temp_mp4_path = temp_ts_path.with_suffix('.mp4')
+
+    try:
+        # Run FFmpeg to convert TS to MP4
+        cmd = [
+            ffmpeg.get_ffmpeg_exe(),  # ensure ffmpeg is available in the environment
+            "-i", str(temp_ts_path),
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-f", "mp4",
+            str(temp_mp4_path)
+        ]
+        result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg error:\n{result.stderr.decode(errors='ignore')}")
+
+        # Read and return the MP4 bytes
+        with open(temp_mp4_path, "rb") as mp4_file:
+            mp4_bytes = mp4_file.read()
+
+    finally:
+        # Clean up temporary files
+        temp_ts_path.unlink(missing_ok=True)
+        temp_mp4_path.unlink(missing_ok=True)
+
+    return mp4_bytes
