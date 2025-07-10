@@ -5,7 +5,7 @@ from typing import Optional
 import logging
 
 import aiohttp
-from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new
+from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new, Resampling
 import pillow_avif  # Keep this import for AVIF support
 
 from ezmm.common.items.item import Item
@@ -112,7 +112,7 @@ async def download_image(
 
         if pillow_img:
             if pillow_img.width > max_size[0] or pillow_img.height > max_size[1]:
-                pillow_img.thumbnail(max_size, PillowImage.LANCZOS)  # Preserves aspect ratio
+                pillow_img.thumbnail(max_size, Resampling.LANCZOS)  # Preserves aspect ratio
 
             if not ignore_small_images or (pillow_img.width > 256 and pillow_img.height > 256):
                 # TODO: Check for duplicates, i.e., reuse an existing image if it already exists in the registry

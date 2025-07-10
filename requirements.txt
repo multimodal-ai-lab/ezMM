@@ -11,3 +11,4 @@ Markdown~=3.5.2
 certifi>=2025.6.15
 imageio-ffmpeg
 m3u8
+jinja2
