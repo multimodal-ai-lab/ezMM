@@ -18,11 +18,11 @@ class Image(Item):
     kind = "image"
     _image: Optional[PillowImage] = None
 
-    def __init__(self, file_path: str | Path = None,
-                 pillow_image: PillowImage = None,
-                 binary_data: bytes = None,
-                 source_url: str = None,
-                 reference: str = None):
+    def __init__(self, file_path: str | Path | None = None,
+                 pillow_image: PillowImage | None = None,
+                 binary_data: bytes | None = None,
+                 source_url: str | None = None,
+                 reference: str | None = None):
         assert file_path or pillow_image or binary_data or reference
 
         if hasattr(self, "id"):
@@ -40,6 +40,9 @@ class Image(Item):
             pillow_image.save(file_path)
             self._image = pillow_image
 
+        # free memory and file handle
+        self.close()
+
         super().__init__(file_path,
                          source_url=source_url,
                          reference=reference)
@@ -48,8 +51,8 @@ class Image(Item):
     def image(self) -> PillowImage:
         """Lazy-loads the PIL image of this Image item."""
         if not self._image:
-            image = pillow_open(self.file_path)
-            self._image = _ensure_rgb_mode(image)
+            with pillow_open(self.file_path) as img:
+                self._image = _ensure_rgb_mode(img).copy()
         return self._image
 
     def get_base64_encoded(self) -> str:
