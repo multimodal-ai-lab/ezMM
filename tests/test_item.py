@@ -83,12 +83,11 @@ def test_relocate_move():
 
 
 @pytest.mark.asyncio
-async def test_download_items():
-    urls = [
+@pytest.mark.parametrize("url", [
         "https://img.zeit.de/wissen/2025-06/hitzewelle-barcelona-temperaturrekord/wide__1000x562__desktop__scale_2",
         "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm"
-    ]
-    for url in urls:
-        item = await download_item(url)
-        assert isinstance(item, Item)
-        print(item)
+])
+async def test_download_items(url):
+    item = await download_item(url)
+    assert isinstance(item, Item)
+    print(item)

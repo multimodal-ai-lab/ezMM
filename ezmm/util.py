@@ -4,13 +4,14 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 import imageio_ffmpeg as ffmpeg
+from io import BytesIO
+import base64
+from PIL.Image import Image as PillowImage
 
 
 def normalize_path(path: Path | str) -> Path:
-    """Ensures the path is a Path object and relative to the current working directory."""
-    path = Path(path).absolute()
-    cwd = Path.cwd()
-    return path.relative_to(cwd)
+    """Ensures the path is an (absolute) Path object."""
+    return Path(path).absolute()
 
 
 def get_item_refs(text: str) -> list[str]:
@@ -55,6 +56,13 @@ def validate_references(text: str) -> bool:
         if item_registry.get(ref) is None:
             return False
     return True
+
+
+def to_base64(image: PillowImage) -> str:
+    """Converts the given Pillow Image to a base64-encoded string."""
+    buffered = BytesIO()
+    image.save(buffered, format="JPEG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
 def ts_to_mp4(ts_bytes: bytes) -> bytes:

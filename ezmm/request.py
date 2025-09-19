@@ -50,7 +50,7 @@ async def is_maybe_video_url(url: str, session: aiohttp.ClientSession) -> bool:
 
 
 async def fetch_headers(url, session: aiohttp.ClientSession, **kwargs) -> dict:
-    async with session.head(url, ssl=ssl_context, **kwargs) as response:
+    async with session.head(url, ssl=ssl_context, headers=HEADERS, **kwargs) as response:
         response.raise_for_status()
         return dict(response.headers)
 

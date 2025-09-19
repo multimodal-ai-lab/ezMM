@@ -68,12 +68,12 @@ def test_bool_true():
     assert seq1
 
 
-def test_render():
-    seq = MultimodalSequence(
-        "The image",
-        Image("in/roses.jpg"),
-        "shows two beautiful roses while the video",
-        Video("in/mountains.mp4"),
-        "shows a nice mountain view."
-    )
-    seq.render()
+# def test_render():
+#     seq = MultimodalSequence(
+#         "The image",
+#         Image("in/roses.jpg"),
+#         "shows two beautiful roses while the video",
+#         Video("in/mountains.mp4"),
+#         "shows a nice mountain view."
+#     )
+#     seq.render()

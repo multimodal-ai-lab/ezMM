@@ -1,18 +1,19 @@
-import base64
+import logging
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
-import logging
 
 import aiohttp
-from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new, Resampling
 import pillow_avif  # Keep this import for AVIF support
+from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new, Resampling
 
 from ezmm.common.items.item import Item
 from ezmm.request import request_static
+from ezmm.util import to_base64
 
 logger = logging.getLogger("ezMM")
 logger.debug(f"`pillow_avif` v{pillow_avif.__version__} loaded for AVIF image support.")
+
 
 class Image(Item):
     kind = "image"
@@ -56,9 +57,7 @@ class Image(Item):
         return self._image
 
     def get_base64_encoded(self) -> str:
-        buffered = BytesIO()
-        self.image.save(buffered, format="JPEG")
-        return base64.b64encode(buffered.getvalue()).decode('utf-8')
+        return to_base64(self.image)
 
     @property
     def width(self) -> int:

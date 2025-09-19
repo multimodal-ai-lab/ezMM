@@ -2,3 +2,5 @@
 /.idea
 /dist/
 /ezMM.egg-info/
+/ezmm/temp/video/1.mp4
+/ezmm/temp/item_registry.db

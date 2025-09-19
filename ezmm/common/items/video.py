@@ -1,19 +1,17 @@
 import base64
 import logging
-import os
-import tempfile
+from pathlib import Path
+from typing import Optional
 from urllib.parse import urljoin
 
 import aiohttp
 import cv2
-from pathlib import Path
-from typing import Optional
-
 import m3u8
+import numpy as np
 
 from ezmm.common.items.item import Item
-from ezmm.request import fetch_headers
-from ezmm.util import ts_to_mp4
+from ezmm.request import fetch_headers, HEADERS
+from ezmm.util import ts_to_mp4, to_base64
 
 logger = logging.getLogger("ezMM")
 
@@ -75,9 +73,32 @@ class Video(Item):
         """Returns the video as bytes."""
         return self.file_path.read_bytes()
 
-    def get_base64_encoded(self) -> str:
-        """Returns the base64-encoded video as a string."""
-        return base64.b64encode(self.bytes).decode('utf-8')
+    def _get_frames(self) -> list[bytes]:
+        """Returns the list of all frames from the video."""
+        frames = []
+        while self.video.isOpened():
+            success, frame = self.video.read()
+            if not success:
+                break
+            _, frame = cv2.imencode(".jpeg", frame)
+            frames.append(frame)
+        self.video.release()
+        return frames
+
+    def sample_frames(self, n_frames: int = 5) -> list[bytes]:
+        """Returns the specified number of frames sampled evenly spaced from the video.
+        Always includes the first frame. Includes the last frame if n_frames > 1."""
+        assert n_frames > 0, "Number of frames must be greater than 0."
+        frames = self._get_frames()
+        frame_ids = np.linspace(0, len(frames) - 1, n_frames, dtype=int)
+        sampled = [frames[i] for i in frame_ids]
+        return sampled
+
+    def get_base64_encoded(self, n_frames: int = 5) -> list[str]:
+        """Returns base64-encoded frames, evenly sampled from the video."""
+        frames = self.sample_frames(n_frames)
+        frames_encoded = [base64.b64encode(frame).decode("utf-8") for frame in frames]
+        return frames_encoded
 
     def _same(self, other):
         return (
@@ -123,7 +144,7 @@ async def download_video_file(
 ) -> Optional[Video]:
     """Download a single video file from a URL and return it as a Video object."""
     try:
-        async with session.get(video_url) as response:
+        async with session.get(video_url, headers=HEADERS) as response:
             if response.status == 200:
                 content = await response.read()
                 video = Video(binary_data=content, source_url=video_url)
@@ -141,7 +162,7 @@ async def download_hls_video(
     """Download an HTTP Live Streaming (HLS) video from a playlist URL and return it as a Video object."""
     try:
         # Download the m3u8 playlist file
-        async with session.get(playlist_url) as response:
+        async with session.get(playlist_url, headers=HEADERS) as response:
             if response.status != 200:
                 logger.debug(f"Failed to download playlist: {response.status}")
                 return None
@@ -159,7 +180,7 @@ async def download_hls_video(
             variant_url = urljoin(base_url, best_playlist.uri)
 
             # Download the variant playlist
-            async with session.get(variant_url) as var_response:
+            async with session.get(variant_url, headers=HEADERS) as var_response:
                 if var_response.status != 200:
                     logger.error(f"Failed to download variant playlist: {var_response.status}")
                     return None
@@ -184,7 +205,7 @@ async def download_hls_video(
 
             # Download the segment with SSL disabled
             try:
-                async with session.get(segment_url) as seg_response:
+                async with session.get(segment_url, headers=HEADERS) as seg_response:
                     if seg_response.status == 200:
                         segment_data = await seg_response.read()
                         video_segments.append(segment_data)
@@ -215,5 +236,7 @@ async def download_vid(url):
 
 if __name__ == "__main__":
     import asyncio
-    video = asyncio.run(download_vid("https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8"))
+
+    video = asyncio.run(
+        download_vid("https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm"))
     print(video)

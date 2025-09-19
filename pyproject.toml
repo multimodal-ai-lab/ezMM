@@ -1,6 +1,6 @@
 [project]
 name = "ezMM"
-version = "0.3.3"
+version = "0.3.4"
 description = "Lightweight Python kit for easy multimodal data processing."
 readme = "README.md"
 requires-python = ">=3.11"

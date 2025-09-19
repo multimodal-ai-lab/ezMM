@@ -2,6 +2,7 @@ import asyncio
 from shutil import copyfile
 
 import aiohttp
+import pytest
 from PIL import Image as PillowImage
 
 from ezmm import Image, MultimodalSequence, download_image
@@ -41,13 +42,12 @@ async def download_img(url):
         return await download_image(url, session)
 
 
-def test_download_image():
-    urls = [
-        "https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill",
-        "https://img.zeit.de/wissen/2025-06/hitzewelle-barcelona-temperaturrekord/wide__1000x562__desktop__scale_2",
-        "https://factly.in/2022-video-of-a-train-fire-incident-from-bangladesh-falsely-shared-as-that-of-an-incident-from-prayagraj-during-the-kumbh-mela/"
-    ]
-    for url in urls:
-        img = asyncio.run(download_img(url))
-        print(img)
-        assert isinstance(img, Image)
+@pytest.mark.parametrize("url", [
+    "https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill",
+    "https://img.zeit.de/wissen/2025-06/hitzewelle-barcelona-temperaturrekord/wide__1000x562__desktop__scale_2",
+    "https://factly.in/wp-content/uploads/2025/02/Train-fire-in-Prayagraj-Claim.jpg"
+])
+def test_download_image(url):
+    img = asyncio.run(download_img(url))
+    print(img)
+    assert isinstance(img, Image)
