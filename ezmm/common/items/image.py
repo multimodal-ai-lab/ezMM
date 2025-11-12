@@ -74,8 +74,11 @@ class Image(Item):
                 self.image.tobytes() == other.image.tobytes()
         )
 
-    def as_html(self) -> str:
-        img = f'<img src="/{self.file_path.as_posix()}" alt="{self.reference}">'
+    def as_html(self, path_relative_to: str | Path = None) -> str:
+        if path_relative_to is None:
+            path_relative_to = Path.cwd()
+        path = self.file_path.relative_to(path_relative_to).as_posix()
+        img = f'<img src="/{path}" alt="{self.reference}">'
         if self.source_url:
             return f'<a href="{self.source_url}">{img}</a>'
         else:
@@ -109,6 +112,7 @@ async def download_image(
     """Download an image from a URL and return it as an Image object."""
     # TODO: Handle very large images like: https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144225/campfire_oli_2018312_lrg.jpg
     content = await request_static(image_url, session, get_text=False)
+    # TODO: Request page dynamically (better move all request-related functions to ScrapeMM)
     if content:
         pillow_img = pillow_open(BytesIO(content))
 

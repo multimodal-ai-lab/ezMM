@@ -19,7 +19,7 @@ class Item(ABC):
     """An element of MultimodalSequences. The data of each item is saved in an individual file."""
     kind: str  # Specifies the type of the item (image, video, ...)
     id: int  # Unique identifier of this item within its kind
-    file_path: Path  # The path (relative to workdir) to the file where the data of this item is stored
+    file_path: Path  # The (absolute) path to the file where the data of this item is stored
     source_url: str  # The (web or file) URL pointing at the Item data's origin
 
     def __new__(cls, file_path: Path | str = None, source_url: str = None, reference: str = None, **kwargs):
@@ -64,7 +64,7 @@ class Item(ABC):
         """Closes any resources held by this item."""
         pass
 
-    def as_html(self) -> str:
+    def as_html(self, path_relative_to: str | Path = None) -> str:
         """Returns the item as HTML code."""
         return f"<p>Item {self.reference} does not support HTML yet.</p>"
 
@@ -84,6 +84,10 @@ class Item(ABC):
             self.file_path = new_path
             from ezmm.common.registry import item_registry
             item_registry.update_file_path(self)
+
+    def get_size(self) -> int:
+        """Returns the size of the item in bytes."""
+        return self.file_path.stat().st_size
 
     def _temp_file_path(self, suffix: str = "") -> Path:
         """Used when the item's ID is not set yet."""

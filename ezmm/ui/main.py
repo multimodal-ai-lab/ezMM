@@ -7,7 +7,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from ezmm import MultimodalSequence
-from ezmm.ui.common import SEQ_PATH, TEMP_PATH, PROJECT_ROOT
+from ezmm.ui.common import SEQ_PATH, TEMP_PATH
+from ezmm.common import PROJECT_ROOT
 
 app = FastAPI()
 

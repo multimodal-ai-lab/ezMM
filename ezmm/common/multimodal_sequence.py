@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Sequence
+
 from markdown import markdown
 
 from ezmm.common.items import Image, Audio, Video
@@ -111,3 +112,11 @@ class MultimodalSequence:
         from ezmm.ui.main import run_server
         print(f"You can view the sequence at http://localhost:7878/sequence/{seq_id}")
         run_server()
+
+
+if __name__ == "__main__":
+    seq = MultimodalSequence(f"Hello world! Here is an image", Image('in/garden.jpg'),
+                             "and another image", Image('in/roses.jpg'),
+                             "and a video", Video('in/snow.mp4'))
+    print(seq)
+    seq.render()

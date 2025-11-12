@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from ezmm.common.items import *
 from ezmm.common.multimodal_sequence import MultimodalSequence
@@ -6,6 +7,7 @@ from ezmm.common.registry import ItemRegistry
 import logging
 
 APP_NAME = "ezMM"
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Set up logger
 logger = logging.getLogger(APP_NAME)

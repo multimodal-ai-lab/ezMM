@@ -44,8 +44,12 @@ class Video(Item):
     def video(self) -> cv2.VideoCapture:
         """Lazy-loads the video capture of this Video item."""
         if not self._video:
-            self._video = cv2.VideoCapture(str(self.file_path))
+            self._open_video()
         return self._video
+
+    def _open_video(self):
+        """Opens the video file for reading."""
+        self._video = cv2.VideoCapture(str(self.file_path))
 
     @property
     def width(self) -> int:
@@ -76,9 +80,12 @@ class Video(Item):
     def _get_frames(self) -> list[bytes]:
         """Returns the list of all frames from the video."""
         frames = []
+        if not self.video.isOpened():
+            self._open_video()
         while self.video.isOpened():
             success, frame = self.video.read()
             if not success:
+                logger.warning(f"Failed to read frame from video {self.file_path}")
                 break
             _, frame = cv2.imencode(".jpeg", frame)
             frames.append(frame)
@@ -90,6 +97,7 @@ class Video(Item):
         Always includes the first frame. Includes the last frame if n_frames > 1."""
         assert n_frames > 0, "Number of frames must be greater than 0."
         frames = self._get_frames()
+        n_frames = min(n_frames, len(frames))
         frame_ids = np.linspace(0, len(frames) - 1, n_frames, dtype=int)
         sampled = [frames[i] for i in frame_ids]
         return sampled
@@ -108,8 +116,11 @@ class Video(Item):
                 self.file_path.read_bytes() == other.file_path.read_bytes()
         )
 
-    def as_html(self) -> str:
-        return f'<video controls src="/{self.file_path.as_posix()}"></video>'
+    def as_html(self, path_relative_to: str | Path = None) -> str:
+        if path_relative_to is None:
+            path_relative_to = Path.cwd()
+        path = self.file_path.relative_to(path_relative_to).as_posix()
+        return f'<video controls src="/{path}"></video>'
 
     def close(self):
         if self._video:
