@@ -11,7 +11,7 @@ import numpy as np
 
 from ezmm.common.items.item import Item
 from ezmm.request import fetch_headers, HEADERS
-from ezmm.util import ts_to_mp4, to_base64
+from ezmm.util import ts_to_mp4
 
 logger = logging.getLogger("ezMM")
 
@@ -77,7 +77,7 @@ class Video(Item):
         """Returns the video as bytes."""
         return self.file_path.read_bytes()
 
-    def _get_frames(self) -> list[bytes]:
+    def _get_frames(self) -> list[np.ndarray]:
         """Returns the list of all frames from the video."""
         frames = []
         if not self.video.isOpened():
@@ -85,14 +85,13 @@ class Video(Item):
         while self.video.isOpened():
             success, frame = self.video.read()
             if not success:
-                logger.warning(f"Failed to read frame from video {self.file_path}")
                 break
             _, frame = cv2.imencode(".jpeg", frame)
             frames.append(frame)
         self.video.release()
         return frames
 
-    def sample_frames(self, n_frames: int = 5) -> list[bytes]:
+    def sample_frames(self, n_frames: int = 5) -> list[np.ndarray]:
         """Returns the specified number of frames sampled evenly spaced from the video.
         Always includes the first frame. Includes the last frame if n_frames > 1."""
         assert n_frames > 0, "Number of frames must be greater than 0."
@@ -161,6 +160,8 @@ async def download_video_file(
                 video = Video(binary_data=content, source_url=video_url)
                 video.relocate(move_not_copy=True)
                 return video
+            else:
+                logger.debug(f"Failed to download video. {response.status}: {response.reason}")
     except Exception as e:
         logger.debug(f"Error downloading video file from {video_url}"
                      f"\n{type(e).__name__}: {e}")

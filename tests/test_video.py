@@ -1,6 +1,7 @@
 from shutil import copyfile
 
 import aiohttp
+import numpy as np
 import pytest
 
 from ezmm import MultimodalSequence, Video, download_video
@@ -57,3 +58,12 @@ async def test_download_video(url):
         vid = await download_video(url, session)
         print(vid)
         assert isinstance(vid, Video)
+
+
+@pytest.mark.parametrize("path", ["in/mountains.mp4", "in/snow.mp4"])
+@pytest.mark.parametrize("n_frames", [1, 5, 10])
+def test_frame_sampling(path: str, n_frames: int):
+    vid = Video(path)
+    frames = vid.sample_frames(n_frames=n_frames)
+    assert len(frames) == n_frames
+    assert isinstance(frames[0], np.ndarray)
