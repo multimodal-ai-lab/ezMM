@@ -1,17 +1,27 @@
+import asyncio
+import ssl
 from typing import Optional
 
 import aiohttp
-import asyncio
 import certifi
-import ssl
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/123.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US;q=0.7,en;q=0.3",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Priority": "u=0, i",
+    "TE": "trailers"
 }
 
 ssl_context = ssl.create_default_context(cafile=certifi.where())
+
 
 async def is_maybe_image_url(url: str, session: aiohttp.ClientSession) -> bool:
     """Returns True iff the URL points at an accessible _pixel_ image file
