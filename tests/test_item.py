@@ -84,7 +84,7 @@ def test_relocate_move():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
-        "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm"
+        "https://media.cnn.com/api/v1/images/stellar/prod/ap22087057359494.jpg?c=16x9&q=h_653,w_1160,c_fill/f_webp"
 ])
 async def test_download_item(url):
     item = await download_item(url)

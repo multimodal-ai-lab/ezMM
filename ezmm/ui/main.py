@@ -1,4 +1,5 @@
 import socket
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -7,15 +8,15 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from ezmm import MultimodalSequence
-from ezmm.ui.common import SEQ_PATH, TEMP_PATH
 from ezmm.common import PROJECT_ROOT
+from ezmm.ui.common import ITEMS_PATH, SEQ_PATH
 
 app = FastAPI()
 
 # Mount templates files (CSS, JS, etc. if needed)
 app.mount("/templates", StaticFiles(directory=PROJECT_ROOT / "ezmm/ui/templates"), name="templates")
 app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "ezmm/ui/static"), name="static")
-app.mount("/temp", StaticFiles(directory=TEMP_PATH), name="temp")
+app.mount("/items", StaticFiles(directory=ITEMS_PATH), name="items")
 app.mount("/in", StaticFiles(directory=PROJECT_ROOT / "in"), name="in")
 
 # Jinja2 templates directory
@@ -23,8 +24,8 @@ templates = Jinja2Templates(directory=PROJECT_ROOT / "ezmm/ui/templates")
 
 
 @app.get("/sequence/{seq_id}", response_class=HTMLResponse)
-async def show_claim(request: Request, seq_id: int):
-    """Reads the specified MultimodalSequence saved in static/sequences
+async def show_sequence(request: Request, seq_id: int):
+    """Reads the specified MultimodalSequence saved in sequences/
     and displays it."""
     file_path = SEQ_PATH / f"{seq_id}.md"
     seq_str = file_path.read_text(encoding="utf-8")

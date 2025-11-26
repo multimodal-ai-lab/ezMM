@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 from abc import ABC
 from datetime import datetime
@@ -8,9 +9,10 @@ from typing import Sequence, Optional
 
 import aiohttp
 
-from ezmm.config import temp_dir
 from ezmm.request import is_maybe_image_url, is_maybe_video_url
 from ezmm.util import is_item_ref, normalize_path
+
+logger = logging.getLogger("ezMM")
 
 REF = "<{kind}:{id}>"  # General reference template, defining the reference syntax
 
@@ -41,6 +43,8 @@ class Item(ABC):
     def __init__(self, file_path: Path | str, source_url: str = None, reference: str = None):
         if hasattr(self, "id"):
             # The item is already initialized (existing instance returned via __new__())
+            if not self.file_path.exists():
+                logger.warning(f"Item {self.reference} does not exist at {self.file_path}.")
             return
         self.file_path = normalize_path(file_path)
         self.source_url = source_url or self.file_path.absolute().as_uri()
@@ -91,13 +95,15 @@ class Item(ABC):
 
     def _temp_file_path(self, suffix: str = "") -> Path:
         """Used when the item's ID is not set yet."""
+        from ezmm.common.registry import item_registry
         filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f") + suffix
-        return normalize_path(temp_dir / "items" / filename)
+        return normalize_path(item_registry.path / "items" / filename)
 
     def _default_file_path(self, suffix: str = "") -> Path:
         """Only usable after item initialization."""
+        from ezmm.common.registry import item_registry
         default_filename = str(self.id) + suffix
-        return normalize_path(temp_dir / self.kind / default_filename)
+        return normalize_path(item_registry.path / self.kind / default_filename)
 
     def __eq__(self, other):
         return (self is other or
@@ -166,6 +172,8 @@ async def download_item(url: str,
         if own_session:
             await session.close()
 
+
 if __name__ == "__main__":
-    result = asyncio.run(download_item("https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill"))
+    result = asyncio.run(download_item(
+        "https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill"))
     print(result)

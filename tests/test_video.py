@@ -47,16 +47,28 @@ def test_base64():
     print(len(vid.get_base64_encoded()))
 
 
+# TODO: Move downloading skills to ScrapeMM
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [
+    "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8",
+    "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8",
+    "https://video.bsky.app/watch/did%3Aplc%3Alvs2rrkrj6usatuglfukwoea/bafkreibdgmt4y3z62opupxdykw53ftvkyoprzxuztzocxqfe2hjskziq44/playlist.m3u8",
+])
+async def test_download_m3u8(url):
+    async with aiohttp.ClientSession() as session:
+        vid = await download_video(url, session)
+        assert isinstance(vid, Video)
+
+
+# TODO: Move downloading skills to ScrapeMM
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
     "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm",
-    "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8",
-    "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8",
+    "https://video.twimg.com/amplify_video/1982791531959332864/vid/avc1/720x892/ByktcD0YE_6cV89u.mp4",
 ])
-async def test_download_video(url):
+async def test_download_mp4_webm(url):
     async with aiohttp.ClientSession() as session:
         vid = await download_video(url, session)
-        print(vid)
         assert isinstance(vid, Video)
 
 

@@ -136,12 +136,13 @@ async def download_video(
     try:
         headers = await fetch_headers(video_url, session, timeout=3)
         content_type = headers.get('Content-Type') or headers.get('content-type')
+        # TODO: Handle binary/octet-stream
         if content_type.startswith("video/"):
             return await download_video_file(video_url, session)
         elif content_type == "application/vnd.apple.mpegurl":
             return await download_hls_video(video_url, session)
         else:
-            logger.warning(f"Cannot download video! Unable to handle content type: {content_type}.")
+            logger.warning(f"Cannot download video from {video_url}. Unable to handle content type: {content_type}.")
 
     except Exception as e:
         logger.debug(f"Error downloading video from {video_url}"

@@ -1,5 +1,5 @@
 from ezmm import Image
-from ezmm.common.registry import item_registry
+from ezmm.common import item_registry
 
 
 def test_registry():
@@ -17,3 +17,9 @@ def test_cache_miss():
 
     assert img1 is not img2  # Due to cache miss, but...
     assert img1.id == img2.id
+
+
+# def test_dir_switch():
+#     item_registry.set_path("temp_test")
+#     img = Image("in/roses.jpg")
+#     assert "temp_test" in img.file_path.as_posix()

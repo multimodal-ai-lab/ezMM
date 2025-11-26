@@ -68,6 +68,16 @@ def test_bool_true():
     assert seq1
 
 
+def test_sequence_resolve():
+    img1 = Image("in/roses.jpg")
+    img2 = Image("in/garden.jpg")
+    string = f"The image {img1.reference} shows two beautiful roses. The image {img2.reference} shows a nice garden."
+    seq = MultimodalSequence(string)
+    assert img1 in seq
+    assert img2 in seq
+    assert seq.images == [img1, img2]
+
+
 # def test_render():
 #     seq = MultimodalSequence(
 #         "The image",

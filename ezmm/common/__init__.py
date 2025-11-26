@@ -3,7 +3,7 @@ from pathlib import Path
 
 from ezmm.common.items import *
 from ezmm.common.multimodal_sequence import MultimodalSequence
-from ezmm.common.registry import ItemRegistry
+from ezmm.common.registry import ItemRegistry, item_registry
 import logging
 
 APP_NAME = "ezMM"
@@ -19,3 +19,12 @@ if not logger.hasHandlers():
     formatter = logging.Formatter('[%(levelname)s]: %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+
+def set_ezmm_path(path: Path | str):
+    logger.info(f"Setting ezMM path to {path}")
+    item_registry.set_path(path)
+
+
+def reset_ezmm():
+    item_registry.reset()

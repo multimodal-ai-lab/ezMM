@@ -6,7 +6,6 @@ from markdown import markdown
 
 from ezmm.common.items import Image, Audio, Video
 from ezmm.common.items.item import Item, resolve_references_from_sequence
-from ezmm.ui.common import SEQ_PATH
 
 
 class MultimodalSequence:
@@ -98,6 +97,8 @@ class MultimodalSequence:
         viewable through a link in the browser. Starts a server (if not started yet)
         that serves the UI. If `blocking` is False, the server is started in a separate
         process."""
+        from ezmm.ui.common import SEQ_PATH
+
         # Create sequences directory if it doesn't exist
         SEQ_PATH.mkdir(parents=True, exist_ok=True)
 
