@@ -23,11 +23,9 @@ class Video(Item):
     def __init__(self, file_path: str | Path = None,
                  binary_data: bytes = None,
                  source_url: str = None,
-                 reference: str = None):
-        assert file_path or binary_data or reference
-
-        if hasattr(self, "id"):
-            return
+                 reference: str = None,
+                 id: int = None):
+        assert file_path or binary_data or reference or id is not None
 
         if binary_data:
             # Save binary data to temporary file
@@ -38,7 +36,8 @@ class Video(Item):
 
         super().__init__(file_path,
                          source_url=source_url,
-                         reference=reference)
+                         reference=reference,
+                         id=id)
 
     @property
     def video(self) -> cv2.VideoCapture:
@@ -115,11 +114,8 @@ class Video(Item):
                 self.file_path.read_bytes() == other.file_path.read_bytes()
         )
 
-    def as_html(self, path_relative_to: str | Path = None) -> str:
-        if path_relative_to is None:
-            path_relative_to = Path.cwd()
-        path = self.file_path.relative_to(path_relative_to).as_posix()
-        return f'<video controls src="/{path}"></video>'
+    def as_html(self) -> str:
+        return f'<video controls src="/items/{self.file_path_relative.as_posix()}"></video>'
 
     def close(self):
         if self._video:
@@ -251,5 +247,6 @@ if __name__ == "__main__":
     import asyncio
 
     video = asyncio.run(
-        download_vid("https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm"))
+        download_vid(
+            "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a7/How_to_make_video.webm/How_to_make_video.webm.1080p.vp9.webm"))
     print(video)

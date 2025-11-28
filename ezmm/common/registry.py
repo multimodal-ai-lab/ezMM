@@ -1,10 +1,11 @@
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from ezmm.common.items import Item, ITEM_CLASSES, KIND2ITEM
-from ezmm.util import parse_ref, normalize_path
+from ezmm.util import parse_ref
 
 logger = logging.getLogger("ezMM")
 
@@ -12,21 +13,30 @@ logger = logging.getLogger("ezMM")
 class ItemRegistry:
     """Keeps track of all the occurring items efficiently.
     Also holds a cache of already loaded items for efficiency."""
-    path: Path  # Directory where the registry is stored
+    path: Path  # Absolute path to the root directory of the registry
     _db_path: Path  # Path to the SQLite DB file
 
     conn: Optional[sqlite3.Connection] = None
     cur: Optional[sqlite3.Cursor] = None
     cache: dict[tuple[str, int], Item] = dict()
 
-    def __init__(self, path: Path | str = "temp/"):
+    def __init__(self, path: Path | str = None):
+        if path is None:
+            path = os.getenv("EZMM")
+            if path:
+                logger.info(f"Found OS environment variable EZMM={path}. "
+                            f"Using it as the root of the ezMM item registry.")
+            else:
+                path = "temp/"
         self.set_path(path)
 
     def set_path(self, path: Path | str):
-        if self.conn:
-            raise RuntimeError("Cannot change path for an established ezMM Item Registry.")
-        self.path = Path(path)
-        self._db_path = self.path / "item_registry.db"
+        path = Path(path)
+        if not hasattr(self, "path") or path != self.path:
+            if self.conn:
+                raise RuntimeError("Cannot change path for an established ezMM Item Registry.")
+            self.path = path.absolute()
+            self._db_path = self.path / "item_registry.db"
 
     def _ensure_connected(self):
         if self.conn is None:
@@ -34,7 +44,7 @@ class ItemRegistry:
 
     def connect(self):
         # Initialize folder, DB, and cache
-        logger.info(f"Connecting to item registry at {self.path.as_posix()}...")
+        logger.info(f"Connecting to item registry at {self.path.as_posix()}")
         if not self.path.exists():
             self.path.mkdir(exist_ok=True, parents=True)
         self.conn = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
@@ -84,26 +94,34 @@ class ItemRegistry:
         if identifier is not None:
             return self.get(kind=kind, identifier=identifier)
 
-    def add_and_assign_id(self, item: Item):
-        """Adds a (partially initialized) item to the registry, if not yet registered.
-        Assigns a proper ID to the item and adds it to the cache."""
+    def add_item(self, item: Item) -> Optional[int]:
+        """Adds an item (without an ID) to the registry, if not yet registered.
+        Returns the assigned item ID and adds it to the cache."""
+        if hasattr(item, "id"):
+            logger.warning(f"Item {item.reference} already has an ID assigned. Not adding to the DB...")
+            return
         if not self.contains(item.kind, item.file_path):
-            item.id = self._insert_into_registry(item, item.kind)
+            identifier = self._insert_into_registry(item, item.kind)
         else:
-            item.id = self._get_id_by_path(item.kind, item.file_path)
-        self._add_to_cache(item)
+            identifier = self._get_id_by_path(item.kind, item.file_path)
+        self._add_to_cache(item, identifier)
+        return identifier
 
-    def get_cached(self, reference: str = None, kind: str = None, file_path: Path | str = None) -> Optional[Item]:
+    def get_cached(self, reference: str = None,
+                   kind: str = None,
+                   file_path: Path | str = None,
+                   identifier: int = None) -> Optional[Item]:
         if reference:
             kind, identifier = parse_ref(reference)
-        else:
-            assert kind is not None
+        elif kind is not None:
             identifier = self._get_id_by_path(kind, file_path)
+        else:
+            assert identifier is not None
         return self._get_cached(kind, identifier)
 
-    def _get_id_by_path(self, kind: str, item_path: Path) -> Optional[int]:
+    def _get_id_by_path(self, kind: str, item_path: Path | str) -> Optional[int]:
         self._ensure_connected()
-        item_path = normalize_path(item_path)
+        item_path = Path(item_path).absolute()
         stmt = f"""
             SELECT id
             FROM {kind}
@@ -126,7 +144,8 @@ class ItemRegistry:
         response = self.cur.execute(stmt, (identifier,))
         if result := response.fetchone():
             item_cls = KIND2ITEM[kind]
-            return item_cls(file_path=Path(result[0]),
+            return item_cls(id=identifier,
+                            file_path=Path(result[0]),
                             source_url=result[1])
 
     def _insert_into_registry(self, item: Item, kind: str) -> int:
@@ -162,9 +181,9 @@ class ItemRegistry:
         None if it is not in the cache."""
         return self.cache.get((kind, identifier))
 
-    def _add_to_cache(self, item: Item) -> None:
+    def _add_to_cache(self, item: Item, identifier: int) -> None:
         """Adds the given item to the cache."""
-        self.cache[(item.kind, item.id)] = item
+        self.cache[(item.kind, identifier)] = item
 
     def close(self):
         self.conn.close()

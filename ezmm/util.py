@@ -9,11 +9,6 @@ import base64
 from PIL.Image import Image as PillowImage
 
 
-def normalize_path(path: Path | str) -> Path:
-    """Ensures the path is an (absolute) Path object."""
-    return Path(path).absolute()
-
-
 def get_item_refs(text: str) -> list[str]:
     """Extracts all item references from the text."""
     from ezmm.common.items import ITEM_REF_REGEX

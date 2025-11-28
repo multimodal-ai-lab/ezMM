@@ -23,30 +23,29 @@ class Image(Item):
                  pillow_image: PillowImage | None = None,
                  binary_data: bytes | None = None,
                  source_url: str | None = None,
-                 reference: str | None = None):
-        assert file_path or pillow_image or binary_data or reference
-
-        if hasattr(self, "id"):
-            # The image is already initialized (existing instance returned via __new__())
-            return
+                 reference: str | None = None,
+                 id: int = None):
+        assert file_path or pillow_image or binary_data or reference or id is not None
 
         if binary_data is not None:
             pillow_image = pillow_open(BytesIO(binary_data))
 
         if pillow_image is not None:
             pillow_image = _ensure_rgb_mode(pillow_image)
+
             # Save the image in a temporary folder
             file_path = self._temp_file_path(suffix=".jpg")
             file_path.parent.mkdir(parents=True, exist_ok=True)
             pillow_image.save(file_path)
             self._image = pillow_image
 
-        # free memory and file handle
-        self.close()
+            # Free memory and file handle
+            self.close()
 
         super().__init__(file_path,
                          source_url=source_url,
-                         reference=reference)
+                         reference=reference,
+                         id=id)
 
     @property
     def image(self) -> PillowImage:
@@ -74,11 +73,8 @@ class Image(Item):
                 self.image.tobytes() == other.image.tobytes()
         )
 
-    def as_html(self, path_relative_to: str | Path = None) -> str:
-        if path_relative_to is None:
-            path_relative_to = Path.cwd()
-        path = self.file_path.relative_to(path_relative_to).as_posix()
-        img = f'<img src="/{path}" alt="{self.reference}">'
+    def as_html(self) -> str:
+        img = f'<img src="/items/{self.file_path_relative.as_posix()}" alt="{self.reference}">'
         if self.source_url:
             return f'<a href="{self.source_url}">{img}</a>'
         else:

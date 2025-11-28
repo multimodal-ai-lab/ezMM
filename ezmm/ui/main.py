@@ -1,4 +1,7 @@
+import logging
+import os
 import socket
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -7,17 +10,23 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-from ezmm import MultimodalSequence
-from ezmm.common import PROJECT_ROOT
-from ezmm.ui.common import ITEMS_PATH, SEQ_PATH
+from ezmm import MultimodalSequence, set_ezmm_path
+from ezmm.common import PROJECT_ROOT, item_registry
+from ezmm.ui.common import SEQ_PATH
+
+ITEMS_PATH = item_registry.path
 
 app = FastAPI()
+
+logger = logging.getLogger("ezMM")
 
 # Mount templates files (CSS, JS, etc. if needed)
 app.mount("/templates", StaticFiles(directory=PROJECT_ROOT / "ezmm/ui/templates"), name="templates")
 app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "ezmm/ui/static"), name="static")
 app.mount("/items", StaticFiles(directory=ITEMS_PATH), name="items")
 app.mount("/in", StaticFiles(directory=PROJECT_ROOT / "in"), name="in")
+
+logger.debug(f"Mounted {ITEMS_PATH.as_posix()} at /items")
 
 # Jinja2 templates directory
 templates = Jinja2Templates(directory=PROJECT_ROOT / "ezmm/ui/templates")

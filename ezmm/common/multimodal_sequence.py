@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Sequence
 
 from markdown import markdown
@@ -47,7 +48,8 @@ class MultimodalSequence:
         return self.data
 
     def as_html(self) -> str:
-        """Returns the sequence as HTML code."""
+        """Returns the sequence as HTML code. Any files of contained items are
+        referenced by paths relative to the registry's root."""
         htmls = []
         for item in self:
             if isinstance(item, Item):
@@ -108,6 +110,9 @@ class MultimodalSequence:
         # Save to file with unique name
         file_path = SEQ_PATH / f"{seq_id}.md"
         file_path.write_text(str(self), encoding="utf-8")
+
+        from ezmm.common import item_registry
+        os.environ["EZMM"] = item_registry.path.as_posix()
 
         # Start the server
         from ezmm.ui.main import run_server
