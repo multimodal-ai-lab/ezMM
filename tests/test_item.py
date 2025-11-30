@@ -43,6 +43,13 @@ def test_from_reference():
     assert img1 is img2
 
 
+def test_from_id():
+    img1 = Image("in/roses.jpg")
+    img2 = Image.from_id(img1.id)
+    assert img1 == img2
+    assert img1 is img2
+
+
 def test_source_default():
     img_path = Path("in/roses.jpg")
     img = Image(img_path)

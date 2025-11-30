@@ -42,7 +42,8 @@ class Video(Item):
     @property
     def video(self) -> cv2.VideoCapture:
         """Lazy-loads the video capture of this Video item."""
-        if not self._video:
+        # Re-open capture if it was never opened or has been released
+        if not self._video or not self._video.isOpened():
             self._open_video()
         return self._video
 
@@ -76,28 +77,38 @@ class Video(Item):
         """Returns the video as bytes."""
         return self.file_path.read_bytes()
 
-    def _get_frames(self) -> list[np.ndarray]:
-        """Returns the list of all frames from the video."""
-        frames = []
-        if not self.video.isOpened():
-            self._open_video()
-        while self.video.isOpened():
-            success, frame = self.video.read()
-            if not success:
-                break
-            _, frame = cv2.imencode(".jpeg", frame)
-            frames.append(frame)
-        self.video.release()
-        return frames
-
     def sample_frames(self, n_frames: int = 5) -> list[np.ndarray]:
         """Returns the specified number of frames sampled evenly spaced from the video.
         Always includes the first frame. Includes the last frame if n_frames > 1."""
         assert n_frames > 0, "Number of frames must be greater than 0."
-        frames = self._get_frames()
-        n_frames = min(n_frames, len(frames))
-        frame_ids = np.linspace(0, len(frames) - 1, n_frames, dtype=int)
-        sampled = [frames[i] for i in frame_ids]
+        # Efficient sampling: seek directly to the required frame indices instead of
+        # decoding the entire video into memory.
+        # Open video if necessary
+        if not self.video.isOpened():
+            self._open_video()
+
+        total_frames = self.frame_count
+        if total_frames <= 0:
+            return []
+
+        n_frames = min(n_frames, total_frames)
+        frame_ids = np.linspace(0, total_frames - 1, n_frames, dtype=int)
+
+        sampled: list[np.ndarray] = []
+        try:
+            for fid in frame_ids:
+                # Seek to the desired frame index
+                self.video.set(cv2.CAP_PROP_POS_FRAMES, int(fid))
+                success, frame = self.video.read()
+                if not success or frame is None:
+                    break
+                _, enc = cv2.imencode(".jpeg", frame)
+                sampled.append(enc)
+        finally:
+            # Match previous behavior: release capture after sampling
+            # Ensure internal handle is reset so future property reads re-open
+            self.close()
+
         return sampled
 
     def get_base64_encoded(self, n_frames: int = 5) -> list[str]:

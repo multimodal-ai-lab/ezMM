@@ -79,3 +79,21 @@ def test_frame_sampling(path: str, n_frames: int):
     frames = vid.sample_frames(n_frames=n_frames)
     assert len(frames) == n_frames
     assert isinstance(frames[0], np.ndarray)
+
+
+@pytest.mark.parametrize("path", ["in/mountains.mp4"])
+def test_metadata(path: str):
+    def assert_metadata():
+        assert vid.width
+        assert vid.height
+        assert vid.frame_count
+        assert vid.fps
+        assert vid.duration
+
+    vid = Video(path)
+    assert_metadata()
+    vid.close()
+    assert_metadata()
+    vid.sample_frames()
+    assert_metadata()
+

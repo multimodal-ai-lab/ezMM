@@ -100,6 +100,11 @@ class Item(ABC):
         from ezmm.common.registry import item_registry
         return item_registry.get(reference)
 
+    @classmethod
+    def from_id(cls, id: int) -> Optional["Item"]:
+        reference = REF.format(kind=cls.kind, id=id)
+        return cls.from_reference(reference)
+
     def close(self):
         """Closes any resources held by this item."""
         pass
@@ -128,7 +133,8 @@ class Item(ABC):
             self.file_path = new_path
             item_registry.update_file_path(self)
 
-    def get_size(self) -> int:
+    @property
+    def size(self) -> int:
         """Returns the size of the item in bytes."""
         return self.file_path.stat().st_size
 
