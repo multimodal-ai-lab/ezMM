@@ -5,6 +5,7 @@ from typing import Optional
 
 import aiohttp
 import pillow_avif  # Keep this import for AVIF support
+import PIL
 from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new, Resampling
 
 from ezmm.common.items.item import Item
@@ -110,7 +111,10 @@ async def download_image(
     content = await request_static(image_url, session, get_text=False)
     # TODO: Request page dynamically (better move all request-related functions to ScrapeMM)
     if content:
-        pillow_img = pillow_open(BytesIO(content))
+        try:
+            pillow_img = pillow_open(BytesIO(content))
+        except PIL.UnidentifiedImageError:
+            return None
 
         if pillow_img:
             if pillow_img.width > max_size[0] or pillow_img.height > max_size[1]:
