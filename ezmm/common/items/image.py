@@ -65,6 +65,7 @@ class Image(Item):
         return self.image.height
 
     def _same(self, other):
+        # TODO: Check for duplicates, i.e., reuse an existing image if it already exists in the registry
         return (
                 self.image.mode == other.image.mode and
                 self.image.size == other.image.size and

@@ -65,6 +65,8 @@ class Video(Item):
     @property
     def duration(self) -> float:
         """Returns the duration of the video in seconds."""
+        if self.fps <= 0:
+            return 0
         return self.frame_count / self.fps
 
     @property
