@@ -1,6 +1,6 @@
-from ezmm.common.items.item import Item, REF, download_item
-from ezmm.common.items.image import Image, download_image
-from ezmm.common.items.video import Video, download_video
+from ezmm.common.items.item import Item, REF
+from ezmm.common.items.image import Image
+from ezmm.common.items.video import Video
 from ezmm.common.items.audio import Audio
 
 ITEM_CLASSES = [Image, Video, Audio]

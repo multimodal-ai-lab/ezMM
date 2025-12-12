@@ -1,9 +1,7 @@
 from pathlib import Path
 from shutil import copyfile
 
-import pytest
-
-from ezmm import Image, Item, download_item
+from ezmm import Image, Item
 
 
 def test_item():
@@ -89,11 +87,4 @@ def test_relocate_move():
     assert not source_path.exists()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-        "https://media.cnn.com/api/v1/images/stellar/prod/ap22087057359494.jpg?c=16x9&q=h_653,w_1160,c_fill/f_webp"
-])
-async def test_download_item(url):
-    item = await download_item(url)
-    assert isinstance(item, Item)
-    print(item)
+

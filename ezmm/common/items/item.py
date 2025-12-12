@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import re
 from abc import ABC
@@ -7,9 +6,6 @@ from pathlib import Path
 from shutil import copyfile, move
 from typing import Sequence, Optional
 
-import aiohttp
-
-from ezmm.request import is_maybe_image_url, is_maybe_video_url
 from ezmm.util import is_item_ref
 
 logger = logging.getLogger("ezMM")
@@ -195,32 +191,3 @@ def resolve_references_from_string(string: str) -> list[str | Item]:
                 raise ValueError(f"Item with reference {substr} does not exist.")
             split[i] = item
     return split
-
-
-async def download_item(url: str,
-                        session: Optional[aiohttp.ClientSession] = None,
-                        ignore_small_images: bool = True) -> Optional[Item]:
-    """Downloads the item from the given URL and returns an instance of the
-    corresponding item class. Reuses a session if provided."""
-
-    own_session = session is None
-    if own_session:
-        session = aiohttp.ClientSession()
-
-    try:
-        if await is_maybe_image_url(url, session):
-            from ezmm.common.items.image import download_image
-            return await download_image(url, ignore_small_images=ignore_small_images, session=session)
-        if await is_maybe_video_url(url, session):
-            from ezmm.common.items.video import download_video
-            return await download_video(url, session)
-        # TODO: Handle audios
-    finally:
-        if own_session:
-            await session.close()
-
-
-if __name__ == "__main__":
-    result = asyncio.run(download_item(
-        "https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill"))
-    print(result)

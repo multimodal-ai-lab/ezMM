@@ -1,11 +1,12 @@
+import base64
 import re
 import subprocess
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
+
 import imageio_ffmpeg as ffmpeg
-from io import BytesIO
-import base64
 from PIL.Image import Image as PillowImage
 
 
@@ -17,7 +18,7 @@ def get_item_refs(text: str) -> list[str]:
     return matches
 
 
-def parse_ref(ref: str) -> (str, int):
+def parse_ref(ref: str) -> tuple[str, int]:
     result = parse_item_ref(ref)
     if result is None:
         raise ValueError(f"Invalid item reference: {ref}")
