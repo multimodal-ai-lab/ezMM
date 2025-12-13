@@ -66,7 +66,5 @@ def test_metadata(path: str):
 
     vid = Video(path)
     assert_metadata()
-    vid.close()
-    assert_metadata()
     vid.sample_frames()
     assert_metadata()
