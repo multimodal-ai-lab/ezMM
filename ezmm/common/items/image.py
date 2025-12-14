@@ -1,8 +1,8 @@
 import logging
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
 
+import numpy as np
 import pillow_avif  # Keep this import for AVIF support
 from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new
 
@@ -15,7 +15,7 @@ logger.debug(f"`pillow_avif` v{pillow_avif.__version__} loaded for AVIF image su
 
 class Image(Item):
     kind = "image"
-    _image: Optional[PillowImage] = None
+    _image: PillowImage | None = None
 
     def __init__(self, file_path: str | Path | None = None,
                  pillow_image: PillowImage | None = None,
@@ -36,9 +36,6 @@ class Image(Item):
             file_path.parent.mkdir(parents=True, exist_ok=True)
             pillow_image.save(file_path)
             self._image = pillow_image
-
-            # Free memory and file handle
-            self.close()
 
         super().__init__(file_path,
                          source_url=source_url,
@@ -64,14 +61,6 @@ class Image(Item):
     def height(self) -> int:
         return self.image.height
 
-    def _same(self, other):
-        # TODO: Check for duplicates, i.e., reuse an existing image if it already exists in the registry
-        return (
-                self.image.mode == other.image.mode and
-                self.image.size == other.image.size and
-                self.image.tobytes() == other.image.tobytes()
-        )
-
     def as_html(self) -> str:
         img = f'<img src="/items/{self.file_path_relative.as_posix()}" alt="{self.reference}">'
         if self.source_url:
@@ -79,10 +68,9 @@ class Image(Item):
         else:
             return img
 
-    def close(self):
-        if self._image:
-            self._image.close()
-            self._image = None
+    def _compute_embedding(self) -> np.ndarray:
+        from ezmm.embedding import embed
+        return embed(self.image)
 
 
 def _ensure_rgb_mode(pillow_image: PillowImage) -> PillowImage:

@@ -1,7 +1,7 @@
 import base64
 import logging
 from pathlib import Path
-from typing import Optional
+from PIL.Image import fromarray
 
 import cv2
 import numpy as np
@@ -80,9 +80,14 @@ class Video(Item):
         """Returns the video as bytes."""
         return self.file_path.read_bytes()
 
-    def sample_frames(self, n_frames: int = 5) -> list[np.ndarray]:
-        """Returns n_frames JPEG-encoded frames sampled evenly from the video.
-        Always includes the first frame. Includes the last frame if n_frames > 1."""
+    def sample_frames(self, n_frames: int = 5, *, format: str = "rgb") -> list[np.ndarray] | list[bytes]:
+        """Returns ``n_frames`` frames sampled evenly from the video.
+
+        - ``format='rgb'`` (default): returns a list of RGB numpy arrays with shape ``(H, W, 3)``.
+        - ``format='jpeg'``: returns a list of JPEG-encoded bytes for each sampled frame.
+
+        Always includes the first frame. Includes the last frame if ``n_frames > 1``.
+        """
         assert n_frames > 0, "Number of frames must be greater than 0."
 
         cap = self._open_cap()
@@ -94,38 +99,41 @@ class Video(Item):
             n_frames = int(min(n_frames, total_frames))
             frame_ids = np.linspace(0, total_frames - 1, n_frames, dtype=int)
 
-            sampled: list[np.ndarray] = []
+            if format not in {"rgb", "jpeg"}:
+                raise ValueError("format must be either 'rgb' or 'jpeg'")
+
+            sampled: list[np.ndarray | bytes] = []
             for fid in frame_ids:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(fid))
                 success, frame = cap.read()
                 if not success or frame is None:
                     break
-                ok, enc = cv2.imencode(".jpeg", frame)
-                if ok:
-                    sampled.append(enc)
+                if format == "rgb":
+                    # Convert BGR (OpenCV) to RGB (expected for PIL/fromarray and general usage)
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    sampled.append(rgb)
                 else:
-                    break
+                    # Directly JPEG-encode the BGR frame to avoid extra conversions
+                    ok, enc = cv2.imencode(".jpeg", frame)
+                    if not ok:
+                        break
+                    sampled.append(enc.tobytes())
             return sampled
         finally:
             cap.release()
 
     def get_base64_encoded(self, n_frames: int = 5) -> list[str]:
-        """Returns base64-encoded frames, evenly sampled from the video."""
-        frames = self.sample_frames(n_frames)
-        frames_encoded = [base64.b64encode(frame).decode("utf-8") for frame in frames]
-        return frames_encoded
-
-    def _same(self, other):
-        return (
-                self.width == other.width and
-                self.height == other.height and
-                self.frame_count == other.frame_count and
-                self.file_path.read_bytes() == other.file_path.read_bytes()
-        )
+        """Returns base64-encoded JPEG frames, evenly sampled from the video."""
+        frames = self.sample_frames(n_frames, format="jpeg")
+        return [base64.b64encode(frame).decode("utf-8") for frame in frames]
 
     def as_html(self) -> str:
         return f'<video controls src="/items/{self.file_path_relative.as_posix()}"></video>'
 
-    def close(self):
-        """Deprecated."""
-        pass
+    def _compute_embedding(self) -> np.ndarray:
+        """Returns the average embedding of 5 equal-distance video frames."""
+        from ezmm.embedding import embed
+        frames = self.sample_frames(5, format='rgb')
+        pillow_images = [fromarray(frame) for frame in frames]
+        embeddings = embed(pillow_images)
+        return np.mean(embeddings, axis=0)

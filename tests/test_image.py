@@ -32,3 +32,18 @@ def test_binary():
     pillow_img = PillowImage.open("in/tulips.jpg")
     img = Image(pillow_image=pillow_img)
     print(img.file_path)
+
+
+def test_similar():
+    img1 = Image("in/roses.jpg")
+    img2 = Image("in/roses_smaller.jpg")
+    img3 = Image("in/roses_cropped.jpg")
+    img4 = Image("in/tulips.jpg")
+    assert 0.99 < img1.cos_sim(img2) <= 1
+    print(img1.cos_sim(img2))
+    assert 0.95 < img1.cos_sim(img3) < 0.99
+    print(img1.cos_sim(img3))
+    assert 0.95 < img2.cos_sim(img3) < 0.99
+    print(img2.cos_sim(img3))
+    assert 0.5 < img1.cos_sim(img4) < 0.8
+    print(img1.cos_sim(img4))

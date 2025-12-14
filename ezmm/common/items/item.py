@@ -6,6 +6,8 @@ from pathlib import Path
 from shutil import copyfile, move
 from typing import Sequence, Optional
 
+import numpy as np
+
 from ezmm.util import is_item_ref
 
 logger = logging.getLogger("ezMM")
@@ -19,6 +21,9 @@ class Item(ABC):
     id: int  # Unique identifier of this item within its kind
     file_path: Path  # The absolute path to the file
     source_url: str  # The (web or file) URL pointing at the Item data's origin
+
+    _sha256: str = None  # Cached SHA-256 hash of the item's file
+    _embedding: np.ndarray = None  # Cached CLIP embedding of the item file
 
     def __new__(cls, file_path: Path | str = None, source_url: str = None, reference: str = None,
                 id: int = None, **kwargs):
@@ -87,10 +92,6 @@ class Item(ABC):
             else:
                 raise FileNotFoundError(f"File of item '{self.reference}' does not exist anymore.")
 
-    def _same(self, other) -> bool:
-        """Compares the content data with the other item for equality."""
-        raise NotImplementedError
-
     @staticmethod
     def from_reference(reference: str) -> Optional["Item"]:
         from ezmm.common.registry import item_registry
@@ -100,10 +101,6 @@ class Item(ABC):
     def from_id(cls, id: int) -> Optional["Item"]:
         reference = REF.format(kind=cls.kind, id=id)
         return cls.from_reference(reference)
-
-    def close(self):
-        """Closes any resources held by this item."""
-        pass
 
     def as_html(self) -> str:
         """Returns the item as HTML code. File paths will be relative to the registry's root."""
@@ -120,7 +117,6 @@ class Item(ABC):
             new_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Move/copy file to target directory
-            self.close()
             move(self.file_path, new_path) \
                 if move_not_copy \
                 else copyfile(self.file_path, new_path)
@@ -133,6 +129,39 @@ class Item(ABC):
     def size(self) -> int:
         """Returns the size of the item in bytes."""
         return self.file_path.stat().st_size
+
+    @property
+    def sha256(self) -> str:
+        """Returns the SHA-256 hash of the item's file."""
+        # TODO: Save hash in registry and keep only unique hashes to reuse existing images
+        if self._sha256:
+            return self._sha256
+        import hashlib
+        h = hashlib.sha256()
+        # Read the file in chunks of 8192 bytes to reduce peak memory usage
+        with self.file_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        self._sha256 = h.hexdigest()
+        return self._sha256
+
+    @property
+    def embedding(self) -> np.ndarray:
+        """Returns the CLIP embedding of the item.
+        TODO: Make this persistent in the item registry."""
+        if self._embedding is not None:
+            return self._embedding
+        self._embedding = self._compute_embedding()
+        return self._embedding
+
+    def _compute_embedding(self) -> np.ndarray:
+        """Computes the CLIP embedding of the item."""
+        raise NotImplementedError
+
+    def cos_sim(self, other: "Item") -> float:
+        """Computes the cosine similarity between this item and another."""
+        return (np.dot(self.embedding, other.embedding) /
+                (np.linalg.norm(self.embedding) * np.linalg.norm(other.embedding)))
 
     def _temp_file_path(self, suffix: str = "") -> Path:
         """Returns a path that can be used for temporary storage.
@@ -151,7 +180,7 @@ class Item(ABC):
         return (self is other or
                 isinstance(other, Item) and (
                         self.kind == other.kind and self.id == other.id or  # Should never trigger
-                        self._same(other)
+                        self.sha256 == other.sha256
                 ))
 
     def __hash__(self):

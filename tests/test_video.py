@@ -68,3 +68,11 @@ def test_metadata(path: str):
     assert_metadata()
     vid.sample_frames()
     assert_metadata()
+
+
+def test_embedding():
+    vid1 = Video("in/mountains.mp4")
+    vid2 = Video("in/snow.mp4")
+    print(vid1.embedding)
+    print(vid2.embedding)
+    print(vid1.cos_sim(vid2))
