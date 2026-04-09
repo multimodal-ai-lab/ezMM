@@ -1,6 +1,7 @@
 import logging
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,7 @@ class ItemRegistry:
     cache: dict[tuple[str, int], Item] = dict()
 
     def __init__(self, path: Path | str = None):
+        self._lock = threading.RLock()
         if path is None:
             path = os.getenv("EZMM")
             if path:
@@ -55,21 +57,22 @@ class ItemRegistry:
 
     def _init_db(self):
         """Initializes a clean, new DB."""
-        for item_cls in ITEM_CLASSES:
-            kind = item_cls.kind
-            stmt = f"""
-                CREATE TABLE IF NOT EXISTS  {kind} (
-                    id INTEGER PRIMARY KEY,
-                    path TEXT NOT NULL UNIQUE,
-                    source_url TEXT NOT NULL
-                );
-            """
-            self.cur.execute(stmt)
-            stmt = f"""
-                CREATE UNIQUE INDEX IF NOT EXISTS {kind}_path_idx ON {kind}(path);
-            """
-            self.cur.execute(stmt)
-        self.conn.commit()
+        with self._lock:
+            for item_cls in ITEM_CLASSES:
+                kind = item_cls.kind
+                stmt = f"""
+                    CREATE TABLE IF NOT EXISTS  {kind} (
+                        id INTEGER PRIMARY KEY,
+                        path TEXT NOT NULL UNIQUE,
+                        source_url TEXT NOT NULL
+                    );
+                """
+                self.cur.execute(stmt)
+                stmt = f"""
+                    CREATE UNIQUE INDEX IF NOT EXISTS {kind}_path_idx ON {kind}(path);
+                """
+                self.cur.execute(stmt)
+            self.conn.commit()
 
     def get(self, reference: str = None, kind: str = None, identifier: int = None) -> Optional[Item]:
         """Gets the referenced item object by loading it from the cache or,
@@ -120,58 +123,62 @@ class ItemRegistry:
         return self._get_cached(kind, identifier)
 
     def _get_id_by_path(self, kind: str, item_path: Path | str) -> Optional[int]:
-        self._ensure_connected()
-        item_path = Path(item_path).absolute()
-        stmt = f"""
-            SELECT id
-            FROM {kind}
-            WHERE path = ?;
-        """
-        response = self.cur.execute(stmt, (item_path.as_posix(),))
-        result = response.fetchone()
-        if result is not None:
-            return result[0]
-        else:
-            return None
+        with self._lock:
+            self._ensure_connected()
+            item_path = Path(item_path).absolute()
+            stmt = f"""
+                SELECT id
+                FROM {kind}
+                WHERE path = ?;
+            """
+            response = self.cur.execute(stmt, (item_path.as_posix(),))
+            result = response.fetchone()
+            if result is not None:
+                return result[0]
+            else:
+                return None
 
     def _get_item_by_id(self, kind: str, identifier: int) -> Optional[Item]:
-        self._ensure_connected()
-        stmt = f"""
-            SELECT path, source_url
-            FROM {kind}
-            WHERE id = ?;
-        """
-        response = self.cur.execute(stmt, (identifier,))
-        if result := response.fetchone():
-            item_cls = KIND2ITEM[kind]
-            return item_cls(id=identifier,
-                            file_path=Path(result[0]),
-                            source_url=result[1])
+        with self._lock:
+            self._ensure_connected()
+            stmt = f"""
+                SELECT path, source_url
+                FROM {kind}
+                WHERE id = ?;
+            """
+            response = self.cur.execute(stmt, (identifier,))
+            if result := response.fetchone():
+                item_cls = KIND2ITEM[kind]
+                return item_cls(id=identifier,
+                                file_path=Path(result[0]),
+                                source_url=result[1])
 
     def _insert_into_registry(self, item: Item, kind: str) -> int:
         """Adds the new item directly to the database and returns its assigned ID."""
-        self._ensure_connected()
-        stmt = f"""
-            INSERT INTO {kind}(path, source_url)
-            VALUES (?, ?);
-        """
-        self.cur.execute(stmt, (item.file_path.as_posix(), item.source_url))
-        self.conn.commit()
+        with self._lock:
+            self._ensure_connected()
+            stmt = f"""
+                INSERT INTO {kind}(path, source_url)
+                VALUES (?, ?);
+            """
+            self.cur.execute(stmt, (item.file_path.as_posix(), item.source_url))
+            self.conn.commit()
 
-        stmt = """SELECT last_insert_rowid();"""
-        response = self.cur.execute(stmt)
-        return response.fetchone()[0]
+            stmt = """SELECT last_insert_rowid();"""
+            response = self.cur.execute(stmt)
+            return response.fetchone()[0]
 
     def update_file_path(self, item: Item):
         """Updates the path for the corresponding item in the registry."""
-        self._ensure_connected()
-        stmt = f"""
-            UPDATE {item.kind}
-            SET path = ?
-            WHERE id = ?;
-        """
-        self.cur.execute(stmt, (item.file_path.as_posix(), item.id))
-        self.conn.commit()
+        with self._lock:
+            self._ensure_connected()
+            stmt = f"""
+                UPDATE {item.kind}
+                SET path = ?
+                WHERE id = ?;
+            """
+            self.cur.execute(stmt, (item.file_path.as_posix(), item.id))
+            self.conn.commit()
 
     def contains(self, kind: str, item_path: Path | str) -> bool:
         return self._get_id_by_path(kind, item_path) is not None
