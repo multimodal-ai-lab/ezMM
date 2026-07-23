@@ -191,16 +191,24 @@ class ItemRegistry:
     def _add_to_cache(self, item: Item, identifier: int) -> None:
         """Adds the given item to the cache."""
         self.cache[(item.kind, identifier)] = item
+        # TODO: Specify a maximum cache size and evict old items
 
     def close(self):
         self.conn.close()
         self.conn = None
 
     def reset(self):
+        """Reopens the connection to the DB and clears the cache. No persistent
+        data will be deleted."""
         if self.conn:
             self.close()
-        self.cache = dict()
+        self.clear_cache()
         self.connect()
+
+    def clear_cache(self):
+        """Resets the cache to free resources. Call this function if you experience
+        out-of-memory issues. This will not affect the persistent data (media files and DB)."""
+        self.cache.clear()
 
 
 item_registry = ItemRegistry()

@@ -195,10 +195,11 @@ def resolve_references_from_sequence(seq: Sequence[str | Item]) -> list[str | It
     processed = []
     for item in seq:
         if isinstance(item, str):
+            # Resolve the string
             if item.strip(" "):  # Drop excess whitespaces
                 resolved = resolve_references_from_string(item)
                 processed.extend(resolved)
-        elif item:  # Drop Nones
+        else:
             processed.append(item)
     return processed
 

@@ -1,23 +1,30 @@
 [project]
 name = "ezMM"
-version = "0.5.1"
+version = "0.5.2"
 description = "Lightweight Python kit for easy multimodal data processing."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{name = "Mark Rothermel", email = "mark.rothermel@tu-darmstadt.de"}]
 dependencies = [
-    "pillow",
-    "pillow-avif-plugin",
-    "opencv-python",
-    "uvicorn",
-    "fastapi",
-    "starlette",
-    "markdown",
+    "pillow~=12.3.0",
+    "pillow-avif-plugin==1.6.0",
+    "opencv-python~=5.0.0.93",
+    "markdown~=3.10.2",
     "imageio-ffmpeg",
     "m3u8",
     "jinja2",
     "fastembed"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    # For visual display
+    "uvicorn~=0.51.0",
+    "fastapi~=0.139.2",
+    "starlette~=1.3.1",
 ]
 
 [project.urls]

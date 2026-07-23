@@ -1,7 +1,5 @@
 import logging
-import os
 import socket
-from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -10,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-from ezmm import MultimodalSequence, set_ezmm_path
+from ezmm import MultimodalSequence
 from ezmm.common import PROJECT_ROOT, item_registry
 from ezmm.ui.common import SEQ_PATH
 

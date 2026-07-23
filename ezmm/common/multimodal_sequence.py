@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import Sequence
+from collections.abc import Sequence as SequenceABC
 
 from markdown import markdown
 
@@ -15,12 +16,9 @@ class MultimodalSequence:
     with ID 0."""
     data: list[str | Item]
 
-    def __init__(self, *args: str | Item | MultimodalSequence | Sequence[str | Item | None] | None):
-        data = args[0] if len(args) == 1 else list(args)
-        if isinstance(data, (str, Item)):
-            data = [data]
-        elif isinstance(data, MultimodalSequence):
-            data = data.data
+    def __init__(self, *args: str | Item | MultimodalSequence |
+                              Sequence[str | Item | MultimodalSequence | None] | None):
+        data = _flatten(args)
         self.data = resolve_references_from_sequence(data) if data else []
 
     @property
@@ -118,6 +116,29 @@ class MultimodalSequence:
         from ezmm.ui.main import run_server
         print(f"You can view the sequence at http://localhost:7878/sequence/{seq_id}")
         run_server()
+
+
+def _flatten(
+        data: Sequence[None | str | Item | MultimodalSequence | Sequence]
+) -> list[str | Item]:
+    """Recursively turns a potentially nested sequence into a flat list of strings and items."""
+    flattened = []
+    for el in data:
+        match el:
+            case None:
+                continue
+            case str():
+                if el:  # Skip empty strings
+                    flattened.append(el)
+            case Item():
+                flattened.append(el)
+            case MultimodalSequence():
+                flattened.extend(el.data)
+            case SequenceABC():  # Must come after str() case
+                flattened.extend(_flatten(el))
+            case _:
+                raise TypeError(f"Unsupported type: {type(el)}")
+    return flattened
 
 
 if __name__ == "__main__":

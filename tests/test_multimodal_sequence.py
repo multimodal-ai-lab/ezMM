@@ -78,6 +78,37 @@ def test_sequence_resolve():
     assert seq.images == [img1, img2]
 
 
+def test_nested_sequence():
+    img = Image("in/roses.jpg")
+    vid = Video("in/mountains.mp4")
+    string = "The previous media show things from nature."
+    seq = MultimodalSequence(img, vid, string)
+    seq_nested = MultimodalSequence("The sequence is nested.", seq)
+    print(seq_nested)
+    assert img in seq_nested
+    assert vid in seq_nested
+    assert seq_nested.images == [img]
+    assert seq_nested.videos == [vid]
+    assert len(seq_nested) == 4
+    assert seq_nested[1] == img
+    assert seq_nested[2] == vid
+    assert seq_nested[3] == string
+
+
+def test_wildly_nested_sequence():
+    img = Image("in/roses.jpg")
+    vid = Video("in/mountains.mp4")
+    seq1 = MultimodalSequence("The image", img, "shows two beautiful roses.")
+    seq2 = MultimodalSequence("The video", vid, "shows a nice mountain view.")
+    seq3 = MultimodalSequence([seq1, seq2, "Nature is beautiful.", ["Double nested", img]], "Here is another string.")
+    print(seq3)
+    assert len(seq3) == 10
+    assert seq3.images == [img, img]
+    assert seq3.videos == [vid]
+    assert seq3[1] == img
+    assert seq3[4] == vid
+
+
 # def test_render():
 #     seq = MultimodalSequence(
 #         "The image",

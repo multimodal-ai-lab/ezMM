@@ -30,3 +30,7 @@ def set_ezmm_path(path: Path | str):
 
 def reset_ezmm():
     item_registry.reset()
+
+
+def clear_cache():
+    item_registry.clear_cache()

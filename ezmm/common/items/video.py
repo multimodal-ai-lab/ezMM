@@ -134,6 +134,9 @@ class Video(Item):
         """Returns the average embedding of 5 equal-distance video frames."""
         from ezmm.embedding import embed
         frames = self.sample_frames(5, format='rgb')
-        pillow_images = [fromarray(frame) for frame in frames]
-        embeddings = embed(pillow_images)
-        return np.mean(embeddings, axis=0)
+        if frames:
+            pillow_images = [fromarray(frame) for frame in frames]
+            embeddings = embed(pillow_images)
+            return np.mean(embeddings, axis=0)
+        else:
+            raise ValueError("Cannot compute embedding without video frames.")
