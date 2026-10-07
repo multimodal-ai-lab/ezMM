@@ -1,45 +1,12 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Sequence {{ seq_id }}</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <style>
-        .sequence-container {
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-        }
+{% extends "base.html" %}
+{% set nav = "sequences" %}
+{% block title %}Sequence {{ seq_id }} · ezMM{% endblock %}
 
-        .media-container img {
-            margin: 20px 0;
-            max-width: 100%;
-            height: auto;
-        }
-
-        .back-button {
-            display: inline-block;
-            padding: 10px 20px;
-            background-color: #f0f0f0;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            text-decoration: none;
-            color: #333;
-            margin-bottom: 20px;
-        }
-
-        .back-button:hover {
-            background-color: #e0e0e0;
-        }
-    </style>
-</head>
-<body>
-
-
-<div class="sequence-container">
-    <a href="/" class="back-button">← Back to Overview</a>
-    <h1>Sequence #{{ seq_id }}</h1>
+{% block content %}
+<nav class="breadcrumbs">
+    <a href="/sequences">Sequences</a><span>/</span><span>#{{ seq_id }}</span>
+</nav>
+<article class="sequence prose">
     {{ sequence.as_html()|safe }}
-</div>
-</body>
-</html>
+</article>
+{% endblock %}

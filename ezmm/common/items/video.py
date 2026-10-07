@@ -23,10 +23,7 @@ class Video(Item):
 
         if binary_data:
             # Save binary data to temporary file
-            file_path = self._temp_file_path(suffix=".mp4")
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, 'wb') as f:
-                f.write(binary_data)
+            file_path = self._write_temp_file(binary_data, suffix=".mp4")
 
         super().__init__(file_path,
                          source_url=source_url,
@@ -74,11 +71,6 @@ class Video(Item):
         if fps <= 0:
             return 0.0
         return self.frame_count / fps
-
-    @property
-    def bytes(self) -> bytes:
-        """Returns the video as bytes."""
-        return self.file_path.read_bytes()
 
     def sample_frames(self, n_frames: int = 5, *, format: str = "rgb") -> list[np.ndarray] | list[bytes]:
         """Returns ``n_frames`` frames sampled evenly from the video.
@@ -128,7 +120,7 @@ class Video(Item):
         return [base64.b64encode(frame).decode("utf-8") for frame in frames]
 
     def as_html(self) -> str:
-        return f'<video controls src="/items/{self.file_path_relative.as_posix()}"></video>'
+        return f'<video controls preload="metadata" src="{self.file_url}"></video>'
 
     def _compute_embedding(self) -> np.ndarray:
         """Returns the average embedding of 5 equal-distance video frames."""

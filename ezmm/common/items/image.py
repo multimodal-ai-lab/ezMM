@@ -62,7 +62,7 @@ class Image(Item):
         return self.image.height
 
     def as_html(self) -> str:
-        img = f'<img src="/items/{self.file_path_relative.as_posix()}" alt="{self.reference}">'
+        img = f'<img src="{self.file_url}" alt="{self.reference}">'
         if self.source_url:
             return f'<a href="{self.source_url}">{img}</a>'
         else:
