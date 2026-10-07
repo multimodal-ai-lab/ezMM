@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% from "_macros.html" import kind_icon, copy_button %}
+{% set nav = "items" %}
+{% set file_url = "/item/" ~ entry.kind ~ "/" ~ entry.id ~ "/file" %}
+{% block title %}{{ entry.reference }} · ezMM{% endblock %}
+
+{% block content %}
+<nav class="breadcrumbs">
+    <a href="/">Registry</a><span>/</span>
+    <a href="/?kind={{ entry.kind }}">{{ entry.kind | capitalize }}s</a><span>/</span>
+    <span>{{ entry.id }}</span>
+</nav>
+
+<div class="detail kind-{{ entry.kind }}">
+    <section class="viewer">
+        {% if not file_exists %}
+        <div class="placeholder large">
+            <span class="placeholder-icon">{{ kind_icon(entry.kind) }}</span>
+            <span class="placeholder-ext">File missing</span>
+        </div>
+        {% elif entry.kind == 'image' %}
+        <a href="{{ file_url }}" target="_blank" rel="noopener"><img src="{{ file_url }}" alt="{{ entry.reference }}"></a>
+        {% elif entry.kind == 'video' %}
+        <video src="{{ file_url }}" controls preload="metadata"></video>
+        {% elif entry.kind == 'audio' %}
+        <div class="audio-stage">
+            <span class="placeholder-icon">{{ kind_icon('audio') }}</span>
+            <audio src="{{ file_url }}" controls preload="metadata"></audio>
+        </div>
+        {% else %}
+        <div class="placeholder large">
+            <span class="placeholder-icon">{{ kind_icon(entry.kind) }}</span>
+            <span class="placeholder-ext">{{ entry.suffix or 'FILE' }}</span>
+            <a class="btn primary" href="{{ file_url }}" download="{{ entry.kind }}_{{ entry.id }}.{{ entry.suffix | lower }}">Download · {{ entry.size | size }}</a>
+        </div>
+        {% endif %}
+    </section>
+
+    <aside class="panel">
+        <div class="panel-head">
+            <span class="chip kind">{{ kind_icon(entry.kind) }}{{ entry.kind }}</span>
+            <h1 class="mono">{{ entry.reference }}</h1>
+            {{ copy_button(entry.reference, "Copy reference") }}
+        </div>
+        {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+
+        <dl class="props">
+            <dt>Size</dt><dd>{{ entry.size | size if entry.size is not none else '–' }}</dd>
+            {% for key, value in details.items() %}
+            <dt>{{ key }}</dt><dd>{{ value }}</dd>
+            {% endfor %}
+            <dt>Added</dt><dd title="{{ entry.created_at }}">{{ entry.created_at | time_ago }}</dd>
+            <dt>Updated</dt><dd title="{{ entry.updated_at }}">{{ entry.updated_at | time_ago }}</dd>
+            <dt>SHA-256</dt>
+            <dd class="mono truncate" title="{{ entry.sha256 or '' }}">{{ entry.sha256 or '–' }}{% if entry.sha256 %} {{ copy_button(entry.sha256, "Copy hash") }}{% endif %}</dd>
+            <dt>Path</dt>
+            <dd class="mono truncate" title="{{ entry.path }}">{{ entry.path }}</dd>
+        </dl>
+
+        <h2>Sources <span class="count">{{ sources | length }}</span></h2>
+        {% if sources %}
+        <ul class="sources">
+            {% for s in sources %}
+            <li>
+                <a href="{{ s.url }}" target="_blank" rel="noopener noreferrer" title="{{ s.url }}">
+                    <span class="source-host">{{ s.url | host }}</span>
+                    <span class="source-url">{{ s.url }}</span>
+                </a>
+                <span class="muted small" title="Last accessed {{ s.last_accessed }}">{{ s.last_accessed | time_ago }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="muted small">No sources recorded.</p>
+        {% endif %}
+
+        {% if aliases %}
+        <h2>Merged duplicates <span class="count">{{ aliases | length }}</span></h2>
+        <p class="muted small">These references resolve to this item:</p>
+        <div class="alias-list">
+            {% for a in aliases %}<span class="chip mono">&lt;{{ entry.kind }}:{{ a }}&gt;</span>{% endfor %}
+        </div>
+        {% endif %}
+    </aside>
+</div>
+{% endblock %}

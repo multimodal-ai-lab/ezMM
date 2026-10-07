@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% from "_macros.html" import kind_icon, copy_button %}
+{% set nav = "items" %}
+{% block title %}{{ (kind ~ 's') | capitalize if kind else 'Items' }} · ezMM{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <div>
+        <h1>Registry</h1>
+        <p class="muted">{{ total_count }} items · {{ total_size | size }}</p>
+    </div>
+    <div class="stats">
+        {% for k in kinds %}
+        <a class="stat kind-{{ k }}" href="{{ browse_url(k, '', missing) }}">
+            <span class="stat-icon">{{ kind_icon(k) }}</span>
+            <span class="stat-body">
+                <span class="stat-value">{{ stats.get(k, {}).get('count', 0) }}</span>
+                <span class="stat-label">{{ k }}s · {{ stats.get(k, {}).get('size', 0) | size }}</span>
+            </span>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+
+<div class="toolbar">
+    <nav class="segmented" aria-label="Filter by kind">
+        <a href="{{ browse_url('', q, missing) }}" class="{{ 'active' if not kind }}">All</a>
+        {% for k in kinds %}
+        <a href="{{ browse_url(k, q, missing) }}" class="{{ 'active' if kind == k }}">{{ k | capitalize }}s</a>
+        {% endfor %}
+    </nav>
+    <div class="toolbar-right">
+        <span class="muted small">
+            {% if q %}{{ total }} result{{ 's' if total != 1 }} for “{{ q }}” · <a href="{{ browse_url(kind, '', missing) }}">clear</a>
+            {% else %}{{ total }} item{{ 's' if total != 1 }}{% endif %}
+            {% if not missing and n_hidden %} · {{ n_hidden }} with missing file hidden{% endif %}
+        </span>
+        <a class="toggle {{ 'on' if missing }}" href="{{ browse_url(kind, q, not missing) }}" role="switch"
+           aria-checked="{{ 'true' if missing else 'false' }}" title="Show or hide items whose file is missing">
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            Show missing files
+        </a>
+    </div>
+</div>
+
+{% if entries %}
+<div class="grid">
+    {% for e in entries %}
+    <a class="card kind-{{ e.kind }}" href="/item/{{ e.kind }}/{{ e.id }}">
+        <div class="thumb">
+            {% if e.missing %}
+            <div class="placeholder missing">
+                <span class="placeholder-icon">{{ kind_icon(e.kind) }}</span>
+                <span class="placeholder-ext">FILE MISSING</span>
+            </div>
+            {% elif e.kind == 'image' %}
+            <img src="/item/{{ e.kind }}/{{ e.id }}/file" alt="{{ e.reference }}" loading="lazy" decoding="async">
+            {% elif e.kind == 'video' %}
+            <video src="/item/{{ e.kind }}/{{ e.id }}/file#t=0.5" muted loop playsinline preload="metadata"></video>
+            <span class="play-badge" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
+            {% else %}
+            <div class="placeholder">
+                <span class="placeholder-icon">{{ kind_icon(e.kind) }}</span>
+                <span class="placeholder-ext">{{ e.suffix or e.kind | upper }}</span>
+            </div>
+            {% endif %}
+            <span class="chip ref">{{ e.reference }}</span>
+        </div>
+        <div class="card-body">
+            <span class="card-title" title="{{ e.source_url or '' }}">{{ e.source_url | host if e.source_url else 'unknown source' }}</span>
+            <span class="card-meta">
+                <span class="kind-dot"></span>{{ e.kind }}{% if e.size is not none %} · {{ e.size | size }}{% endif %}
+                <span class="spacer"></span>{{ e.created_at | time_ago }}
+            </span>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+
+{% if n_pages > 1 %}
+<nav class="pagination" aria-label="Pagination">
+    <a class="btn {{ 'disabled' if page <= 1 }}" href="{{ browse_url(kind, q, missing, page - 1) }}">← Previous</a>
+    <span class="muted small">Page {{ page }} of {{ n_pages }}</span>
+    <a class="btn {{ 'disabled' if page >= n_pages }}" href="{{ browse_url(kind, q, missing, page + 1) }}">Next →</a>
+</nav>
+{% endif %}
+
+{% else %}
+<div class="empty">
+    <div class="empty-icon">{{ kind_icon(kind or 'file') }}</div>
+    {% if n_hidden %}
+    <h2>Only items with missing files</h2>
+    <p class="muted">{{ n_hidden }} item{{ 's' if n_hidden != 1 }} hidden because {{ 'their files are' if n_hidden != 1 else 'its file is' }} missing.
+        <a class="link" href="{{ browse_url(kind, q, True) }}">Show them</a></p>
+    {% else %}
+    <h2>{{ 'No matches' if q else 'Nothing here yet' }}</h2>
+    <p class="muted">
+        {% if q %}No items match “{{ q }}”.{% else %}Items you load with ezMM, e.g. <code>Image("photo.jpg")</code>, show up here.{% endif %}
+    </p>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

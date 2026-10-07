@@ -109,6 +109,114 @@ def test_wildly_nested_sequence():
     assert seq3[4] == vid
 
 
+def _assert_flat(seq: MultimodalSequence):
+    assert all(isinstance(el, (str, Image, Video)) for el in seq.data)
+
+
+def test_text():
+    img = Image("in/roses.jpg")
+    seq = MultimodalSequence("The image", img, "shows two beautiful roses.")
+    assert seq.text == "The image shows two beautiful roses."
+    assert MultimodalSequence(img).text == ""
+    assert MultimodalSequence(f"Look: {img.reference} nice").text == "Look: nice"
+
+
+def test_append():
+    img = Image("in/roses.jpg")
+    seq = MultimodalSequence("Hello")
+    seq.append(img, "world")
+    seq.append(MultimodalSequence("nested", Video("in/mountains.mp4")))
+    seq.append(None)
+    assert len(seq) == 5
+    assert seq[1] is img
+    _assert_flat(seq)
+
+
+def test_append_resolves_references():
+    img = Image("in/roses.jpg")
+    seq = MultimodalSequence()
+    seq.append(f"The image {img.reference} is nice.")
+    assert seq.images == [img]
+
+
+def test_extend():
+    img = Image("in/roses.jpg")
+    seq = MultimodalSequence("A")
+    seq.extend(["B", img, ["C", MultimodalSequence("D")]])
+    assert seq.data == ["A", "B", img, "C", "D"]
+
+
+def test_insert():
+    img = Image("in/roses.jpg")
+    seq = MultimodalSequence("A", "C")
+    seq.insert(1, MultimodalSequence("B", img))
+    assert seq.data == ["A", "B", img, "C"]
+    seq.insert(-1, "X")
+    assert seq.data == ["A", "B", img, "X", "C"]
+    seq.insert(0, "Start")
+    assert seq[0] == "Start"
+    _assert_flat(seq)
+
+
+def test_setitem():
+    img = Image("in/roses.jpg")
+    seq = MultimodalSequence("A", "B", "C")
+    seq[1] = img
+    assert seq.data == ["A", img, "C"]
+    seq[-1] = MultimodalSequence("X", "Y")  # Gets flattened into the sequence
+    assert seq.data == ["A", img, "X", "Y"]
+    seq[0:2] = "Z"
+    assert seq.data == ["Z", "X", "Y"]
+    _assert_flat(seq)
+
+
+def test_delete_remove_pop():
+    img = Image("in/roses.jpg")
+    seq = MultimodalSequence("A", img, "B", "C")
+    del seq[0]
+    assert seq.data == [img, "B", "C"]
+    seq.remove(img)
+    assert seq.data == ["B", "C"]
+    assert seq.pop() == "C"
+    seq.clear()
+    assert not seq
+
+
+def test_add():
+    img = Image("in/roses.jpg")
+    seq1 = MultimodalSequence("A", img)
+    seq2 = MultimodalSequence("B")
+    combined = seq1 + seq2
+    assert combined.data == ["A", img, "B"]
+    assert seq1.data == ["A", img]  # Unchanged
+    assert ("Start" + seq2).data == ["Start", "B"]
+    assert (seq2 + img).data == ["B", img]
+
+
+def test_iadd():
+    img = Image("in/roses.jpg")
+    seq = MultimodalSequence("A")
+    original = seq
+    seq += MultimodalSequence(img, "B")
+    seq += "C"
+    assert seq is original
+    assert seq.data == ["A", img, "B", "C"]
+    _assert_flat(seq)
+
+
+def test_self_append():
+    seq = MultimodalSequence("A", "B")
+    seq += seq
+    assert seq.data == ["A", "B", "A", "B"]
+
+
+def test_copy():
+    seq = MultimodalSequence("A")
+    copied = seq.copy()
+    copied.append("B")
+    assert seq.data == ["A"]
+
+
 # def test_render():
 #     seq = MultimodalSequence(
 #         "The image",

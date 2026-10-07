@@ -1,4 +1,5 @@
 import logging
+import mimetypes
 import re
 from abc import ABC
 from datetime import datetime
@@ -29,23 +30,26 @@ class Item(ABC):
                 id: int = None, **kwargs):
         """Checks if there already exists an instance of the item with the given reference.
         If yes, returns the existing reference. Otherwise, instantiates a new one."""
+        from ezmm.common.registry import item_registry
+        item = None
         if id is not None:
             # This is a re-instantiation of an existing item
-            from ezmm.common.registry import item_registry
-            item = item_registry.get_cached(reference=reference, kind=cls.kind, file_path=file_path)
-            if item:
-                item.source_url = source_url or item.source_url
-                return item
+            item = item_registry.get_cached(kind=cls.kind, identifier=id)
 
-        elif file_path or reference:
-            # Look up an existing instance instead of creating a new one
-            from ezmm.common.registry import item_registry
-            item = item_registry.get_cached(reference=reference, kind=cls.kind, file_path=file_path)
-            if item:
-                item.source_url = source_url or item.source_url
-                return item
-            elif reference:
+        elif reference:
+            item = item_registry.get(reference)
+            if item is None:
                 raise ValueError(f"No item with reference '{reference}'.")
+
+        elif file_path:
+            # Look up an existing instance instead of creating a new one
+            item = item_registry.get_cached(kind=cls.kind, file_path=file_path)
+
+        if item:
+            if source_url and id is None:
+                item.source_url = source_url
+                item_registry.add_source_url(item.kind, item.id, source_url)
+            return item
 
         return super().__new__(cls)
 
@@ -59,14 +63,41 @@ class Item(ABC):
         if id is not None:
             self.id = id
         else:
-            # This item is new, so save it to the registry and get an ID assigned
+            # This item is new, so save it to the registry and get an ID assigned. If an
+            # identical file is registered already, the existing ID and file get adopted.
+            self._validate_new_file()
             from ezmm.common.registry import item_registry
             self.id = item_registry.add_item(self)
         self.validate_file_path()  # Make sure the file still exists
 
+    def _validate_new_file(self):
+        """Hook to check a new file before it gets registered. Raises an error if invalid."""
+        pass
+
     @property
     def reference(self) -> str:
         return REF.format(kind=self.kind, id=self.id)
+
+    @property
+    def source_urls(self) -> list[str]:
+        """Returns all known source URLs of this item, ordered by the time they were added."""
+        from ezmm.common.registry import item_registry
+        return item_registry.get_source_urls(self.kind, self.id)
+
+    @property
+    def file_url(self) -> str:
+        """The URL under which the ezMM web UI serves this item's file."""
+        return f"/item/{self.kind}/{self.id}/file"
+
+    @property
+    def mime_type(self) -> str:
+        """Returns the MIME type of the item's file, guessed from its file extension."""
+        return mimetypes.guess_type(self.file_path.name)[0] or "application/octet-stream"
+
+    @property
+    def bytes(self) -> bytes:
+        """Returns the raw content of the item's file."""
+        return self.file_path.read_bytes()
 
     @property
     def file_path_relative(self) -> Path:
@@ -132,17 +163,11 @@ class Item(ABC):
 
     @property
     def sha256(self) -> str:
-        """Returns the SHA-256 hash of the item's file."""
-        # TODO: Save hash in registry and keep only unique hashes to reuse existing images
+        """Returns the SHA-256 hash of the item's file (stored in the registry)."""
         if self._sha256:
             return self._sha256
-        import hashlib
-        h = hashlib.sha256()
-        # Read the file in chunks of 8192 bytes to reduce peak memory usage
-        with self.file_path.open("rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                h.update(chunk)
-        self._sha256 = h.hexdigest()
+        from ezmm.common.registry import compute_sha256
+        self._sha256 = compute_sha256(self.file_path)
         return self._sha256
 
     @property
@@ -163,6 +188,13 @@ class Item(ABC):
         return (np.dot(self.embedding, other.embedding) /
                 (np.linalg.norm(self.embedding) * np.linalg.norm(other.embedding)))
 
+    def _write_temp_file(self, data: bytes, suffix: str) -> Path:
+        """Saves the binary data into a temporary file inside the registry and returns its path."""
+        file_path = self._temp_file_path(suffix=suffix)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(data)
+        return file_path
+
     def _temp_file_path(self, suffix: str = "") -> Path:
         """Returns a path that can be used for temporary storage.
         Use it when the item's ID is not set yet."""
@@ -179,12 +211,11 @@ class Item(ABC):
     def __eq__(self, other):
         return (self is other or
                 isinstance(other, Item) and (
-                        self.kind == other.kind and self.id == other.id or  # Should never trigger
+                        self.kind == other.kind and self.id == other.id or
                         self.sha256 == other.sha256
                 ))
 
     def __hash__(self):
-        # TODO: Make hash content-dependent => identify known items by hash
         return hash((self.kind, self.id))
 
 
@@ -220,4 +251,4 @@ def resolve_references_from_string(string: str) -> list[str | Item]:
             if item is None:
                 raise ValueError(f"Item with reference {substr} does not exist.")
             split[i] = item
-    return split
+    return [el for el in split if el != ""]  # Drop empty strings, e.g., after a trailing reference

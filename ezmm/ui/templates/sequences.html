@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% set nav = "sequences" %}
+{% block title %}Sequences · ezMM{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <div>
+        <h1>Sequences</h1>
+        <p class="muted">MultimodalSequences rendered via <code>seq.render()</code></p>
+    </div>
+</section>
+
+{% if sequences %}
+<div class="seq-list">
+    {% for s in sequences %}
+    <a class="seq-row" href="/sequence/{{ s.id }}">
+        <span class="mono seq-id">#{{ s.id }}</span>
+        <span class="seq-preview">{{ s.preview or '(no text)' }}</span>
+        <span class="seq-counts">
+            {% if s.seq.images %}<span class="chip kind-image"><span class="kind-dot"></span>{{ s.seq.images | length }}</span>{% endif %}
+            {% if s.seq.videos %}<span class="chip kind-video"><span class="kind-dot"></span>{{ s.seq.videos | length }}</span>{% endif %}
+            {% if s.seq.audios %}<span class="chip kind-audio"><span class="kind-dot"></span>{{ s.seq.audios | length }}</span>{% endif %}
+            {% if s.seq.files %}<span class="chip kind-file"><span class="kind-dot"></span>{{ s.seq.files | length }}</span>{% endif %}
+        </span>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+    <h2>No sequences yet</h2>
+    <p class="muted">Call <code>seq.render()</code> on a MultimodalSequence to view it here.</p>
+</div>
+{% endif %}
+{% endblock %}

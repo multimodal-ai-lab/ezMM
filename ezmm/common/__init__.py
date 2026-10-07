@@ -34,3 +34,8 @@ def reset_ezmm():
 
 def clear_cache():
     item_registry.clear_cache()
+
+
+def deduplicate(dry_run: bool = False) -> dict:
+    """Removes all duplicate files from the registry. See `ItemRegistry.deduplicate()`."""
+    return item_registry.deduplicate(dry_run=dry_run)
