@@ -522,20 +522,28 @@ class ItemRegistry:
     # Browsing
 
     def list_items(self, kind: str = None, query: str = None,
-                   offset: int = 0, limit: int = 50) -> list[dict]:
+                   offset: int = 0, limit: int = 50, include_missing: bool = True) -> list[dict]:
         """Returns the registry entries (newest first, without aliases) as dicts,
-        optionally filtered by kind and a search query (matching source URLs and paths)."""
+        optionally filtered by kind and a search query (matching source URLs and paths).
+        With include_missing=False, entries whose file does not exist are skipped."""
         where, params = self._filter(kind, query)
-        rows = self._execute(f"""
+        stmt = f"""
             SELECT kind, id, path, sha256, size, canonical_id, created_at, updated_at
             FROM items WHERE {where}
-            ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?;
-        """, params + (limit, offset))
-        return [self._row_to_dict(row) for row in rows]
+            ORDER BY created_at DESC, id DESC"""
+        if include_missing:
+            rows = self._execute(stmt + " LIMIT ? OFFSET ?;", params + (limit, offset))
+            return [self._row_to_dict(row) for row in rows]
+        # File existence is not known to the DB, so check it for all matching entries
+        entries = [self._row_to_dict(row) for row in self._execute(stmt + ";", params)]
+        return [e for e in entries if e["path"] and e["path"].exists()][offset:offset + limit]
 
-    def count_items(self, kind: str = None, query: str = None) -> int:
+    def count_items(self, kind: str = None, query: str = None, include_missing: bool = True) -> int:
         where, params = self._filter(kind, query)
-        return self._execute(f"SELECT COUNT(*) FROM items WHERE {where};", params)[0][0]
+        if include_missing:
+            return self._execute(f"SELECT COUNT(*) FROM items WHERE {where};", params)[0][0]
+        paths = self._execute(f"SELECT path FROM items WHERE {where};", params)
+        return sum(1 for (path,) in paths if path and self._from_db_path(path).exists())
 
     def stats(self) -> dict[str, dict]:
         """Returns the number of items and the total file size per kind."""

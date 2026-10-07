@@ -6,7 +6,7 @@ import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -57,8 +57,15 @@ def _duration(seconds: float) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def _browse_url(kind: str = "", q: str = "", missing: bool = False, page: int = 1) -> str:
+    """Returns the URL of the browse page with the given filters (omitting defaults)."""
+    params = {"kind": kind, "q": q, "missing": 1 if missing else None, "page": page if page > 1 else None}
+    query = urlencode({key: value for key, value in params.items() if value})
+    return "/?" + query if query else "/"
+
+
 templates.env.filters.update(size=format_size, time_ago=_time_ago, host=_host, duration=_duration)
-templates.env.globals.update(kinds=KINDS)
+templates.env.globals.update(kinds=KINDS, browse_url=_browse_url)
 
 
 def _get_entry(kind: str, identifier: int) -> dict:
@@ -71,13 +78,16 @@ def _get_entry(kind: str, identifier: int) -> dict:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def browse(request: Request, kind: str = "", q: str = "", page: int = 1):
-    """Shows a grid of all items in the registry, filterable by kind and search query."""
+async def browse(request: Request, kind: str = "", q: str = "", page: int = 1, missing: bool = False):
+    """Shows a grid of all items in the registry, filterable by kind and search query.
+    Items whose file is missing are hidden unless `missing` is set."""
     kind = kind if kind in KINDS else ""
-    total = item_registry.count_items(kind or None, q or None)
+    total_all = item_registry.count_items(kind or None, q or None)
+    total = total_all if missing else item_registry.count_items(kind or None, q or None, include_missing=False)
     n_pages = max(math.ceil(total / PAGE_SIZE), 1)
     page = min(max(page, 1), n_pages)
-    entries = item_registry.list_items(kind or None, q or None, offset=(page - 1) * PAGE_SIZE, limit=PAGE_SIZE)
+    entries = item_registry.list_items(kind or None, q or None, offset=(page - 1) * PAGE_SIZE, limit=PAGE_SIZE,
+                                       include_missing=missing)
     for entry in entries:
         source_urls = item_registry.get_source_urls(entry["kind"], entry["id"])
         entry["source_url"] = source_urls[0] if source_urls else None
@@ -92,6 +102,8 @@ async def browse(request: Request, kind: str = "", q: str = "", page: int = 1):
         "page": page,
         "n_pages": n_pages,
         "total": total,
+        "missing": missing,
+        "n_hidden": total_all - total,
         "stats": stats,
         "total_count": sum(s["count"] for s in stats.values()),
         "total_size": sum(s["size"] for s in stats.values()),

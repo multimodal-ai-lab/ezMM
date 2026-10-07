@@ -82,3 +82,16 @@ def test_list_and_stats():
     assert item_registry.list_items(query="flowers.com")[0]["id"] == img.id
     assert item_registry.list_items(query=img.sha256)[0]["id"] == img.id
     assert item_registry.stats()["image"]["count"] == 2
+
+
+def test_exclude_missing(tmp_path):
+    from shutil import copyfile
+    gone = tmp_path / "gone.jpg"
+    copyfile("in/garden.jpg", gone)
+    missing_img = Image(gone)
+    img = Image("in/roses.jpg")
+    gone.unlink()
+    assert item_registry.count_items() == 2
+    assert item_registry.count_items(include_missing=False) == 1
+    assert [e["id"] for e in item_registry.list_items(include_missing=False)] == [img.id]
+    assert {e["id"] for e in item_registry.list_items()} == {img.id, missing_img.id}

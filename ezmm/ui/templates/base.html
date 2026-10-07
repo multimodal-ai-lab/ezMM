@@ -27,6 +27,7 @@
         <form class="search" action="/" method="get" role="search">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
             {% if kind %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
+            {% if missing %}<input type="hidden" name="missing" value="1">{% endif %}
             <input id="search" type="search" name="q" value="{{ q or '' }}" placeholder="Search URLs, paths, hashes…" autocomplete="off">
             <kbd>/</kbd>
         </form>

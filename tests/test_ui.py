@@ -89,3 +89,32 @@ def test_sequences(client):
     response = client.get("/sequence/12345678")
     assert response.status_code == 200
     assert img.file_url in response.text
+
+
+def test_missing_files_hidden_by_default(client, tmp_path):
+    from shutil import copyfile
+    gone = tmp_path / "gone.jpg"
+    copyfile("in/garden.jpg", gone)
+    missing_img = Image(gone)
+    img = Image("in/roses.jpg")
+    gone.unlink()
+
+    response = client.get("/")
+    assert f'href="/item/image/{img.id}"' in response.text
+    assert f'href="/item/image/{missing_img.id}"' not in response.text
+    assert "1 with missing file hidden" in response.text
+
+    response = client.get("/?missing=1")
+    assert f'href="/item/image/{missing_img.id}"' in response.text
+    assert "FILE MISSING" in response.text
+
+
+def test_only_missing_files(client, tmp_path):
+    from shutil import copyfile
+    gone = tmp_path / "gone.jpg"
+    copyfile("in/garden.jpg", gone)
+    Image(gone)
+    gone.unlink()
+    response = client.get("/")
+    assert "Only items with missing files" in response.text
+    assert 'href="/?missing=1"' in response.text
