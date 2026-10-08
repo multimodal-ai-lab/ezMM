@@ -2,6 +2,7 @@
     python -m ezmm ui [--path PATH] [--host HOST] [--port PORT]   # Browse the registry in the browser
     python -m ezmm dedup [--path PATH] [--dry-run]                # Remove duplicate files from the registry
     python -m ezmm migrate [--path PATH]                          # Migrate a legacy registry DB
+    python -m ezmm check [--path PATH]                            # Check which items' files are missing
 """
 import argparse
 import os
@@ -23,8 +24,11 @@ def main(argv: list[str] = None):
 
     migrate = commands.add_parser("migrate", help="Migrate a legacy registry DB to the current schema.")
 
+    check = commands.add_parser("check", help="Check for all items whether their file exists "
+                                              "and update the registry's 'missing' flags.")
+
     # Allow `--path` after the sub-command, too
-    for sub in (ui, dedup, migrate):
+    for sub in (ui, dedup, migrate, check):
         sub.add_argument("--path", dest="sub_path", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     path = getattr(args, "sub_path", None) or args.path
@@ -52,8 +56,13 @@ def main(argv: list[str] = None):
               f"Hashed {report['hashed']} files that had no hash yet.")
 
     elif args.command == "migrate":
-        item_registry.connect() if item_registry.conn is None else item_registry.migrate()
+        item_registry.migrate()
         print(f"Registry at {item_registry.path.as_posix()} is up to date.")
+
+    elif args.command == "check":
+        result = item_registry.check_files()
+        print(f"Checked {result['checked']} items: {result['missing']} files missing "
+              f"({result['changed']} flags updated).")
 
 
 if __name__ == "__main__":

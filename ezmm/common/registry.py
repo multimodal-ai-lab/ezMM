@@ -3,17 +3,21 @@ import logging
 import os
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable, Iterable, TypeVar
 
 from ezmm.common.items import Item, KIND2ITEM
 from ezmm.util import parse_ref
 
 logger = logging.getLogger("ezMM")
 
-SCHEMA_VERSION = 2  # Stored in the DB via PRAGMA user_version (legacy per-kind schema = 0)
+SCHEMA_VERSION = 3  # Stored in the DB via PRAGMA user_version (legacy per-kind schema = 0)
+
+# Number of threads used to read/hash files in bulk operations (migration, deduplication, file checks)
+N_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 
 SCHEMA = """
     CREATE TABLE IF NOT EXISTS items (
@@ -24,6 +28,7 @@ SCHEMA = """
         sha256 TEXT,              -- Hash of the raw file bytes, used for deduplication
         size INTEGER,             -- File size in bytes
         canonical_id INTEGER,     -- If set, this row is an alias (removed duplicate) of item (kind, canonical_id)
+        missing INTEGER NOT NULL DEFAULT 0,  -- 1 if the file was found missing (a shortcut for browsing only)
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (kind, id)
@@ -50,11 +55,39 @@ def _now() -> str:
 
 def compute_sha256(path: Path) -> str:
     """Returns the SHA-256 hash of the file's raw bytes."""
-    h = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def _parallel_map(fn: Callable[[T], R], inputs: Iterable[T], label: str = None) -> list[R]:
+    """Applies the (I/O-bound) function to all inputs using a thread pool, preserving the order.
+    Hashing releases the GIL, so file reading and hashing run truly in parallel."""
+    inputs = list(inputs)
+    if len(inputs) <= 1:
+        return [fn(x) for x in inputs]
+    results = []
+    with ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
+        for i, result in enumerate(pool.map(fn, inputs), start=1):
+            results.append(result)
+            if label and i % 1000 == 0:
+                logger.info(f"{label}: {i}/{len(inputs)} files processed...")
+    return results
+
+
+def _hash_file(path: Optional[Path]) -> Optional[tuple[str, int]]:
+    """Returns the SHA-256 hash and size of the file, or None if it cannot be read."""
+    try:
+        return compute_sha256(path), path.stat().st_size
+    except (OSError, TypeError):
+        return None
+
+
+def _exists(path: Optional[Path]) -> bool:
+    return path is not None and path.exists()
 
 
 class ItemRegistry:
@@ -131,11 +164,7 @@ class ItemRegistry:
                 raise RuntimeError(f"The ezMM registry at {self.path.as_posix()} uses schema version {version}, "
                                    f"but this ezMM version supports only up to {SCHEMA_VERSION}. Please upgrade ezMM.")
             if version < SCHEMA_VERSION:
-                if self._legacy_tables():
-                    self.migrate()
-                else:
-                    with self._transaction("EXCLUSIVE"):
-                        self._create_schema()
+                self.migrate()
 
     def _create_schema(self):
         """Creates all tables and indices (if not existing) and sets the schema version."""
@@ -151,65 +180,92 @@ class ItemRegistry:
                 if name not in ("items", "sources") and not name.startswith("sqlite_")]
 
     def migrate(self):
-        """Migrates a legacy DB (one table per item kind) to the unified schema. Item IDs
-        are preserved so that existing references remain valid. A backup of the legacy DB
-        is written next to it. Does nothing if the DB is already up to date."""
+        """Migrates the DB to the current schema (creates the schema for a new DB). Item IDs
+        are preserved so that existing references remain valid. A backup of the old DB is
+        written next to it. Does nothing if the DB is already up to date."""
         with self._lock:
             self._ensure_connected()
-            legacy_tables = self._legacy_tables()
-            if self.conn.execute("PRAGMA user_version;").fetchone()[0] >= SCHEMA_VERSION or not legacy_tables:
+            version = self.conn.execute("PRAGMA user_version;").fetchone()[0]
+            if version >= SCHEMA_VERSION:
                 return
+            if version == 0 and not self._legacy_tables():
+                with self._transaction("EXCLUSIVE"):
+                    self._create_schema()  # New DB
+            elif version == 0:
+                self._migrate_from_v1()
+            elif version == 2:
+                self._migrate_from_v2()
+            else:
+                raise RuntimeError(f"Cannot migrate the ezMM registry from unknown schema version {version}.")
 
-            logger.info(f"Migrating legacy ezMM registry at {self.path.as_posix()} to schema v{SCHEMA_VERSION}...")
-            backup_path = self.path / "item_registry.v1.bak.db"
-            if backup_path.exists():
-                backup_path = self.path / f"item_registry.v1.bak.{datetime.now():%Y%m%d-%H%M%S}.db"
-            with sqlite3.connect(backup_path) as backup:
-                self.conn.backup(backup)
-            backup.close()
-            logger.info(f"Backup of the legacy registry written to {backup_path.as_posix()}")
+    def _backup(self, version: int):
+        backup_path = self.path / f"item_registry.v{version}.bak.db"
+        if backup_path.exists():
+            backup_path = self.path / f"item_registry.v{version}.bak.{datetime.now():%Y%m%d-%H%M%S}.db"
+        backup = sqlite3.connect(backup_path)
+        self.conn.backup(backup)
+        backup.close()
+        logger.info(f"Backup of the registry written to {backup_path.as_posix()}")
 
-            # Read and hash everything first (slow part, outside the write transaction)
-            rows = []
+    def _migrate_from_v1(self):
+        """Migrates a legacy DB (one table per item kind) to the unified schema."""
+        legacy_tables = self._legacy_tables()
+        logger.info(f"Migrating legacy ezMM registry at {self.path.as_posix()} to schema v{SCHEMA_VERSION}...")
+        self._backup(1)
+
+        # Read, heal, and hash everything first (slow part, outside the write transaction)
+        rows = []
+        for kind in legacy_tables:
+            for identifier, path, source_url in self.conn.execute(
+                    f"SELECT id, path, source_url FROM {kind} ORDER BY id;").fetchall():
+                rows.append((kind, identifier, Path(path), source_url))
+
+        def heal(row) -> Path:
+            kind, identifier, path, _ = row
+            if path.exists():
+                return path
+            # Heal the path, e.g., if the registry was moved: try the default location
+            # inside the registry and the file's original folder inside the registry
+            candidates = [self.path / kind / f"{identifier}{path.suffix}",
+                          self.path / path.parent.name / path.name]
+            healed = next((c for c in candidates if c.exists()), None)
+            if healed is None:
+                logger.warning(f"File of <{kind}:{identifier}> not found at '{path.as_posix()}'.")
+            return healed or path
+
+        paths = _parallel_map(heal, rows)
+        hashes = _parallel_map(_hash_file, paths, label="Migration")
+
+        now = _now()
+        with self._transaction("EXCLUSIVE"):
+            if self.conn.execute("PRAGMA user_version;").fetchone()[0] >= SCHEMA_VERSION:
+                return  # Another process migrated the DB in the meantime
+            self._create_schema()
+            for (kind, identifier, _, source_url), path, hashed in zip(rows, paths, hashes):
+                sha256, size = hashed or (None, None)
+                row_id = self.conn.execute("""
+                    INSERT INTO items(kind, id, path, sha256, size, canonical_id, missing, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?);
+                """, (kind, identifier, self._to_db_path(path), sha256, size, int(hashed is None), now, now)).lastrowid
+                self._link_source(row_id, source_url)
             for kind in legacy_tables:
-                for identifier, path, source_url in self.conn.execute(
-                        f"SELECT id, path, source_url FROM {kind} ORDER BY id;").fetchall():
-                    rows.append((kind, identifier, path, source_url))
-            now = _now()
-            records = []
-            for i, (kind, identifier, path, source_url) in enumerate(rows, start=1):
-                path = Path(path)
-                if not path.exists():
-                    # Heal the path, e.g., if the registry was moved: try the default location
-                    # inside the registry and the file's original folder inside the registry
-                    candidates = [self.path / kind / f"{identifier}{path.suffix}",
-                                  self.path / path.parent.name / path.name]
-                    healed = next((c for c in candidates if c.exists()), None)
-                    if healed:
-                        path = healed
-                    else:
-                        logger.warning(f"File of <{kind}:{identifier}> not found at '{path.as_posix()}'.")
-                sha256 = size = None
-                if path.exists():
-                    sha256 = compute_sha256(path)
-                    size = path.stat().st_size
-                records.append((kind, identifier, self._to_db_path(path), sha256, size, source_url))
-                if i % 100 == 0:
-                    logger.info(f"Migrated {i}/{len(rows)} items...")
+                self.conn.execute(f"DROP TABLE {kind};")
+        logger.info(f"Migration of {len(rows)} items completed.")
 
-            with self._transaction("EXCLUSIVE"):
-                if self.conn.execute("PRAGMA user_version;").fetchone()[0] >= SCHEMA_VERSION:
-                    return  # Another process migrated the DB in the meantime
-                self._create_schema()
-                for kind, identifier, path, sha256, size, source_url in records:
-                    row_id = self.conn.execute("""
-                        INSERT INTO items(kind, id, path, sha256, size, canonical_id, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, NULL, ?, ?);
-                    """, (kind, identifier, path, sha256, size, now, now)).lastrowid
-                    self._link_source(row_id, source_url)
-                for kind in legacy_tables:
-                    self.conn.execute(f"DROP TABLE {kind};")
-            logger.info(f"Migration of {len(records)} items completed.")
+    def _migrate_from_v2(self):
+        """Adds the `missing` column (schema v3) and determines its values."""
+        logger.info(f"Migrating ezMM registry at {self.path.as_posix()} to schema v{SCHEMA_VERSION}...")
+        self._backup(2)
+        rows = self.conn.execute("SELECT row_id, path FROM items WHERE canonical_id IS NULL;").fetchall()
+        exists = _parallel_map(_exists, [self._from_db_path(path) for _, path in rows])
+        with self._transaction("EXCLUSIVE"):
+            if self.conn.execute("PRAGMA user_version;").fetchone()[0] >= SCHEMA_VERSION:
+                return  # Another process migrated the DB in the meantime
+            self.conn.execute("ALTER TABLE items ADD COLUMN missing INTEGER NOT NULL DEFAULT 0;")
+            self.conn.executemany("UPDATE items SET missing = 1 WHERE row_id = ?;",
+                                  [(row_id,) for (row_id, _), e in zip(rows, exists) if not e])
+            self._create_schema()
+        logger.info(f"Migration completed. {exists.count(False)} of {len(rows)} files are missing.")
 
     # ---------------------------------------------------------------------------------------------
     # Path handling
@@ -311,9 +367,8 @@ class ItemRegistry:
 
     def get_row(self, kind: str, identifier: int) -> Optional[dict]:
         """Returns the raw registry entry of the item as a dict (without loading the item)."""
-        rows = self._execute("""
-            SELECT kind, id, path, sha256, size, canonical_id, created_at, updated_at
-            FROM items WHERE kind = ? AND id = ?;
+        rows = self._execute(f"""
+            SELECT {self._COLUMNS} FROM items WHERE kind = ? AND id = ?;
         """, (kind, identifier))
         return self._row_to_dict(rows[0]) if rows else None
 
@@ -349,9 +404,16 @@ class ItemRegistry:
                 return self.get(kind=kind, identifier=row["canonical_id"])
             source_urls = self.get_source_urls(kind, identifier)
             item_cls = KIND2ITEM[kind]
-            item = item_cls(id=identifier,
-                            file_path=row["path"],
-                            source_url=source_urls[0] if source_urls else None)
+            # Never rely on the `missing` flag here: the item validates its file itself
+            try:
+                item = item_cls(id=identifier,
+                                file_path=row["path"],
+                                source_url=source_urls[0] if source_urls else None)
+            except FileNotFoundError:
+                self.set_missing(kind, identifier, True)
+                raise
+            if row["missing"]:
+                self.set_missing(kind, identifier, False)
             if row["sha256"] and item._sha256 is None:
                 item._sha256 = row["sha256"]
             self._add_to_cache(item, identifier)
@@ -402,7 +464,7 @@ class ItemRegistry:
             item.file_path = existing_path
         else:
             # The existing entry's file is gone, so heal it with the new file
-            self.conn.execute("UPDATE items SET path = ?, updated_at = ? WHERE kind = ? AND id = ?;",
+            self.conn.execute("UPDATE items SET path = ?, missing = 0, updated_at = ? WHERE kind = ? AND id = ?;",
                               (self._to_db_path(item.file_path), _now(), item.kind, identifier))
 
     def add_source_url(self, kind: str, identifier: int, url: Optional[str]):
@@ -438,8 +500,25 @@ class ItemRegistry:
     def update_file_path(self, item: Item):
         """Updates the path for the corresponding item in the registry."""
         with self._transaction():
-            self.conn.execute("UPDATE items SET path = ?, updated_at = ? WHERE kind = ? AND id = ?;",
+            self.conn.execute("UPDATE items SET path = ?, missing = 0, updated_at = ? WHERE kind = ? AND id = ?;",
                               (self._to_db_path(item.file_path), _now(), item.kind, item.id))
+
+    def set_missing(self, kind: str, identifier: int, missing: bool):
+        """Records whether the item's file is missing. The flag is only a shortcut for
+        browsing (e.g., in the web UI); loading an item always checks its file directly."""
+        with self._transaction():
+            self.conn.execute("UPDATE items SET missing = ? WHERE kind = ? AND id = ? AND missing != ?;",
+                              (int(missing), kind, identifier, int(missing)))
+
+    def check_files(self) -> dict:
+        """Checks for all items whether their file exists and updates the `missing` flags
+        accordingly. Returns the number of checked and missing files."""
+        rows = self._execute("SELECT row_id, path, missing FROM items WHERE canonical_id IS NULL;")
+        exists = _parallel_map(_exists, [self._from_db_path(path) for _, path, _ in rows], label="File check")
+        changes = [(int(not e), row_id) for (row_id, _, missing), e in zip(rows, exists) if bool(missing) == e]
+        with self._transaction():
+            self.conn.executemany("UPDATE items SET missing = ? WHERE row_id = ?;", changes)
+        return dict(checked=len(rows), missing=exists.count(False), changed=len(changes))
 
     def contains(self, kind: str, item_path: Path | str) -> bool:
         return self._get_id_by_path(kind, item_path) is not None
@@ -455,17 +534,16 @@ class ItemRegistry:
         deleted only if they are located inside the registry. Returns a report."""
         report = dict(hashed=0, groups=0, removed=[], freed_bytes=0, deleted_files=[])
 
-        # Backfill missing hashes
-        missing = self._execute("SELECT kind, id, path FROM items WHERE canonical_id IS NULL AND sha256 IS NULL;")
-        for kind, identifier, path in missing:
-            path = self._from_db_path(path)
-            if path is not None and path.exists():
-                report["hashed"] += 1
-                if not dry_run:
-                    with self._transaction():
-                        self.conn.execute("UPDATE items SET sha256 = ?, size = ?, updated_at = ? "
-                                          "WHERE kind = ? AND id = ?;",
-                                          (compute_sha256(path), path.stat().st_size, _now(), kind, identifier))
+        # Backfill missing hashes (in parallel)
+        unhashed = self._execute("SELECT row_id, path FROM items WHERE canonical_id IS NULL AND sha256 IS NULL;")
+        hashes = _parallel_map(_hash_file, [self._from_db_path(path) for _, path in unhashed], label="Hashing")
+        updates = [(sha256, size, _now(), row_id) for (row_id, _), (sha256, size) in
+                   ((row, hashed) for row, hashed in zip(unhashed, hashes) if hashed)]
+        report["hashed"] = len(updates)
+        if updates and not dry_run:
+            with self._transaction():
+                self.conn.executemany("UPDATE items SET sha256 = ?, size = ?, missing = 0, updated_at = ? "
+                                      "WHERE row_id = ?;", updates)
 
         groups = self._execute("""
             SELECT kind, sha256 FROM items
@@ -483,13 +561,10 @@ class ItemRegistry:
                 (keeper_id, keeper_path, _), duplicates = rows[0], rows[1:]
                 keeper_path = self._from_db_path(keeper_path)
 
-                # Prefer keeping a file that is located inside the registry
-                if not (keeper_path and keeper_path.exists() and self.is_inside(keeper_path)):
-                    for _, dup_path, _ in duplicates:
-                        dup_path = self._from_db_path(dup_path)
-                        if dup_path and dup_path.exists() and self.is_inside(dup_path):
-                            keeper_path = dup_path
-                            break
+                # Prefer keeping an existing file located inside the registry, then any existing file
+                candidates = [keeper_path] + [self._from_db_path(path) for _, path, _ in duplicates]
+                existing = [c for c in candidates if _exists(c)]
+                keeper_path = next((c for c in existing if self.is_inside(c)), existing[0] if existing else keeper_path)
 
                 now = _now()
                 for dup_id, dup_path, dup_size in duplicates:
@@ -509,8 +584,10 @@ class ItemRegistry:
                     self.conn.execute("UPDATE items SET canonical_id = ?, path = NULL, updated_at = ? "
                                       "WHERE kind = ? AND id = ?;", (keeper_id, now, kind, dup_id))
                 if not dry_run:
-                    self.conn.execute("UPDATE items SET path = ?, updated_at = ? WHERE kind = ? AND id = ?;",
-                                      (self._to_db_path(keeper_path), now, kind, keeper_id))
+                    self.conn.execute("UPDATE items SET path = ?, missing = ?, updated_at = ? "
+                                      "WHERE kind = ? AND id = ?;",
+                                      (self._to_db_path(keeper_path), int(not _exists(keeper_path)), now, kind,
+                                       keeper_id))
 
         if not dry_run:
             for path in to_delete:
@@ -525,25 +602,17 @@ class ItemRegistry:
                    offset: int = 0, limit: int = 50, include_missing: bool = True) -> list[dict]:
         """Returns the registry entries (newest first, without aliases) as dicts,
         optionally filtered by kind and a search query (matching source URLs and paths).
-        With include_missing=False, entries whose file does not exist are skipped."""
-        where, params = self._filter(kind, query)
-        stmt = f"""
-            SELECT kind, id, path, sha256, size, canonical_id, created_at, updated_at
-            FROM items WHERE {where}
-            ORDER BY created_at DESC, id DESC"""
-        if include_missing:
-            rows = self._execute(stmt + " LIMIT ? OFFSET ?;", params + (limit, offset))
-            return [self._row_to_dict(row) for row in rows]
-        # File existence is not known to the DB, so check it for all matching entries
-        entries = [self._row_to_dict(row) for row in self._execute(stmt + ";", params)]
-        return [e for e in entries if e["path"] and e["path"].exists()][offset:offset + limit]
+        With include_missing=False, entries flagged as missing are skipped (see `check_files()`)."""
+        where, params = self._filter(kind, query, include_missing)
+        rows = self._execute(f"""
+            SELECT {self._COLUMNS} FROM items WHERE {where}
+            ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?;
+        """, params + (limit, offset))
+        return [self._row_to_dict(row) for row in rows]
 
     def count_items(self, kind: str = None, query: str = None, include_missing: bool = True) -> int:
-        where, params = self._filter(kind, query)
-        if include_missing:
-            return self._execute(f"SELECT COUNT(*) FROM items WHERE {where};", params)[0][0]
-        paths = self._execute(f"SELECT path FROM items WHERE {where};", params)
-        return sum(1 for (path,) in paths if path and self._from_db_path(path).exists())
+        where, params = self._filter(kind, query, include_missing)
+        return self._execute(f"SELECT COUNT(*) FROM items WHERE {where};", params)[0][0]
 
     def stats(self) -> dict[str, dict]:
         """Returns the number of items and the total file size per kind."""
@@ -554,8 +623,10 @@ class ItemRegistry:
         return {kind: dict(count=count, size=size) for kind, count, size in rows}
 
     @staticmethod
-    def _filter(kind: Optional[str], query: Optional[str]) -> tuple[str, tuple]:
+    def _filter(kind: Optional[str], query: Optional[str], include_missing: bool = True) -> tuple[str, tuple]:
         where, params = ["canonical_id IS NULL"], []
+        if not include_missing:
+            where.append("missing = 0")
         if kind:
             where.append("kind = ?")
             params.append(kind)
@@ -566,11 +637,13 @@ class ItemRegistry:
             params += [pattern, query, pattern]
         return " AND ".join(where), tuple(params)
 
+    _COLUMNS = "kind, id, path, sha256, size, canonical_id, missing, created_at, updated_at"
+
     def _row_to_dict(self, row: tuple) -> dict:
-        kind, identifier, path, sha256, size, canonical_id, created_at, updated_at = row
+        kind, identifier, path, sha256, size, canonical_id, missing, created_at, updated_at = row
         return dict(kind=kind, id=identifier, path=self._from_db_path(path), sha256=sha256, size=size,
-                    canonical_id=canonical_id, created_at=created_at, updated_at=updated_at,
-                    reference=f"<{kind}:{identifier}>")
+                    canonical_id=canonical_id, missing=bool(missing), created_at=created_at,
+                    updated_at=updated_at, reference=f"<{kind}:{identifier}>")
 
     # ---------------------------------------------------------------------------------------------
     # Cache and connection

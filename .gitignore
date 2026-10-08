@@ -2,3 +2,5 @@
 /.idea
 /dist/
 /ezMM.egg-info/
+/AGENTS.md
+/.venv/

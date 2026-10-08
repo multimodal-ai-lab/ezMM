@@ -56,7 +56,8 @@ All items can be created from a file path or from binary data, e.g., `Audio(bina
 ezMM keeps track of all items in a registry (an SQLite DB plus media files) located at `temp/` or at the path specified by the `EZMM` environment variable (or `set_ezmm_path()`).
 - **Deduplication:** Identical files (same kind and byte-identical content, incl. embedded metadata) collapse to the same item and reference. Each item keeps all its source URLs (`item.source_urls`). To find an item by URL, use `item_registry.get_by_source_url(url)`.
 - **Cleanup:** `python -m ezmm dedup [--dry-run]` removes duplicates from existing registries. References to removed duplicates keep resolving to the remaining item.
-- **Migration:** Registries created with ezMM < 0.6 are migrated automatically on first use (a backup `item_registry.v1.bak.db` is kept). Older ezMM versions cannot read migrated registries.
+- **Missing files:** The registry remembers which items' files are missing (used by the web UI to hide them). Run `python -m ezmm check` to re-check all files, e.g., after moving or deleting files outside of ezMM.
+- **Migration:** Registries created with older ezMM versions are migrated automatically on first use (a backup `item_registry.v<version>.bak.db` is kept). Older ezMM versions cannot read migrated registries.
 
 ## Web UI
 Install with `pip install ezmm[ui]` and run

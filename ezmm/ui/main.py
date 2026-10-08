@@ -80,19 +80,30 @@ def _get_entry(kind: str, identifier: int) -> dict:
 @app.get("/", response_class=HTMLResponse)
 async def browse(request: Request, kind: str = "", q: str = "", page: int = 1, missing: bool = False):
     """Shows a grid of all items in the registry, filterable by kind and search query.
-    Items whose file is missing are hidden unless `missing` is set."""
+    Items whose file is missing are hidden unless `missing` is set. Filtering relies on the
+    registry's `missing` flags, which get corrected for all items shown on the page."""
     kind = kind if kind in KINDS else ""
-    total_all = item_registry.count_items(kind or None, q or None)
-    total = total_all if missing else item_registry.count_items(kind or None, q or None, include_missing=False)
-    n_pages = max(math.ceil(total / PAGE_SIZE), 1)
-    page = min(max(page, 1), n_pages)
-    entries = item_registry.list_items(kind or None, q or None, offset=(page - 1) * PAGE_SIZE, limit=PAGE_SIZE,
-                                       include_missing=missing)
+    for _ in range(2):  # Repeat once if the flags of shown items turned out to be outdated
+        total_all = item_registry.count_items(kind or None, q or None)
+        total = total_all if missing else item_registry.count_items(kind or None, q or None, include_missing=False)
+        n_pages = max(math.ceil(total / PAGE_SIZE), 1)
+        page = min(max(page, 1), n_pages)
+        entries = item_registry.list_items(kind or None, q or None, offset=(page - 1) * PAGE_SIZE,
+                                           limit=PAGE_SIZE, include_missing=missing)
+        outdated = False
+        for entry in entries:
+            exists = bool(entry["path"] and entry["path"].exists())
+            if entry["missing"] == exists:
+                item_registry.set_missing(entry["kind"], entry["id"], not exists)
+                entry["missing"] = not exists
+                outdated = True
+        if missing or not outdated:
+            break
+
     for entry in entries:
         source_urls = item_registry.get_source_urls(entry["kind"], entry["id"])
         entry["source_url"] = source_urls[0] if source_urls else None
         entry["suffix"] = entry["path"].suffix.lstrip(".").upper() if entry["path"] else ""
-        entry["missing"] = not (entry["path"] and entry["path"].exists())
 
     stats = item_registry.stats()
     return templates.TemplateResponse(request, "browse.html", {
@@ -136,11 +147,14 @@ async def show_item(request: Request, kind: str, identifier: int):
         logger.warning(f"Could not load item <{kind}:{identifier}>: {e}")
 
     entry["suffix"] = entry["path"].suffix.lstrip(".").upper() if entry["path"] else ""
+    file_exists = bool(entry["path"] and entry["path"].exists())
+    if entry["missing"] == file_exists:
+        item_registry.set_missing(kind, identifier, not file_exists)
     return templates.TemplateResponse(request, "item.html", {
         "entry": entry,
         "details": details,
         "error": error,
-        "file_exists": bool(entry["path"] and entry["path"].exists()),
+        "file_exists": file_exists,
         "sources": item_registry.get_sources(kind, identifier),
         "aliases": item_registry.get_aliases(kind, identifier),
     })
@@ -154,6 +168,7 @@ async def item_file(kind: str, identifier: int):
         return RedirectResponse(f"/item/{kind}/{entry['canonical_id']}/file")
     path = entry["path"]
     if path is None or not path.exists():
+        item_registry.set_missing(kind, identifier, True)
         raise HTTPException(404, f"File of <{kind}:{identifier}> not found.")
     return FileResponse(path)
 

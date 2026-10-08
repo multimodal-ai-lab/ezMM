@@ -1,4 +1,7 @@
 from pathlib import Path
+from shutil import copyfile
+
+import pytest
 
 from ezmm import Image
 from ezmm.common import item_registry
@@ -84,14 +87,67 @@ def test_list_and_stats():
     assert item_registry.stats()["image"]["count"] == 2
 
 
-def test_exclude_missing(tmp_path):
-    from shutil import copyfile
+def _make_missing_image(tmp_path) -> Image:
     gone = tmp_path / "gone.jpg"
     copyfile("in/garden.jpg", gone)
-    missing_img = Image(gone)
-    img = Image("in/roses.jpg")
+    img = Image(gone)
     gone.unlink()
+    return img
+
+
+def test_exclude_missing(tmp_path):
+    missing_img = _make_missing_image(tmp_path)
+    img = Image("in/roses.jpg")
+    # The flag is not updated until the file is found missing
+    assert item_registry.count_items(include_missing=False) == 2
+
+    result = item_registry.check_files()
+    assert result == dict(checked=2, missing=1, changed=1)
+    assert item_registry.get_row("image", missing_img.id)["missing"]
     assert item_registry.count_items() == 2
     assert item_registry.count_items(include_missing=False) == 1
     assert [e["id"] for e in item_registry.list_items(include_missing=False)] == [img.id]
     assert {e["id"] for e in item_registry.list_items()} == {img.id, missing_img.id}
+
+
+def test_reinstantiation_marks_missing(tmp_path):
+    img = _make_missing_image(tmp_path)
+    item_registry.clear_cache()
+    with pytest.raises(FileNotFoundError):
+        Image.from_id(img.id)
+    assert item_registry.get_row("image", img.id)["missing"]
+
+
+def test_reinstantiation_ignores_missing_flag():
+    img = Image("in/roses.jpg")
+    item_registry.set_missing("image", img.id, True)  # Wrong flag
+    item_registry.clear_cache()
+    loaded = Image.from_id(img.id)  # Must not rely on the flag
+    assert loaded == img
+    assert not item_registry.get_row("image", img.id)["missing"]  # Flag got corrected
+
+
+def test_relocation_clears_missing_flag():
+    img = Image("in/roses.jpg")
+    item_registry.set_missing("image", img.id, True)
+    img.relocate()
+    assert not item_registry.get_row("image", img.id)["missing"]
+
+
+def test_check_files_clears_flag():
+    img = Image("in/roses.jpg")
+    item_registry.set_missing("image", img.id, True)
+    assert item_registry.check_files() == dict(checked=1, missing=0, changed=1)
+    assert not item_registry.get_row("image", img.id)["missing"]
+
+
+def test_compute_sha256():
+    import hashlib
+    from ezmm.common.registry import compute_sha256
+    data = Path("in/mountains.mp4").read_bytes()
+    assert compute_sha256(Path("in/mountains.mp4")) == hashlib.sha256(data).hexdigest()
+
+
+def test_parallel_map_preserves_order():
+    from ezmm.common.registry import _parallel_map
+    assert _parallel_map(lambda x: x * 2, range(5000)) == [x * 2 for x in range(5000)]
