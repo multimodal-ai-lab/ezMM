@@ -1,5 +1,6 @@
 """In-memory index of (normalized) embedding vectors for fast similarity search, located
 either in RAM (device 'cpu', float32) or in GPU memory (device 'cuda', float16, requires PyTorch)."""
+import threading
 from typing import Hashable, Iterable
 
 import numpy as np
@@ -15,7 +16,7 @@ def truncate(vectors: np.ndarray, dim: int) -> np.ndarray:
 class VectorIndex:
     """Holds one vector of dimension `dim` per key: float32 in RAM (CPUs compute float16 slowly)
     and float16 in GPU memory (half the memory, fast on GPUs). Added vectors are truncated to
-    `dim` and normalized; they get merged into the index lazily on the next query."""
+    `dim` and normalized; they get merged into the index lazily on the next query. Thread-safe."""
 
     def __init__(self, dim: int, device: str = "cpu"):
         self.dim = dim
@@ -26,44 +27,70 @@ class VectorIndex:
         self._matrix = self._to_device(np.empty((0, dim), dtype=self.dtype))
         self._pending_keys: list[Hashable] = []
         self._pending_vectors: list[np.ndarray] = []
+        self._lock = threading.Lock()
+        self._loaded = threading.Event()
+        self._error: BaseException | None = None
 
     @classmethod
     def build(cls, dim: int, device: str, n: int,
               batches: Iterable[tuple[list[Hashable], np.ndarray]]) -> "VectorIndex":
-        """Builds the index from batches of keys and vectors with `n` vectors in total,
-        without holding more than one copy of the matrix in memory."""
+        """Builds the index from batches of keys and vectors with `n` vectors in total."""
         index = cls(dim, device)
-        matrix = np.empty((n, dim), dtype=index.dtype)
-        for keys, vectors in batches:
-            start = len(index.keys)
-            matrix[start:start + len(keys)] = truncate(vectors, dim)
-            for key in keys:
-                index._positions[key] = len(index.keys)
-                index.keys.append(key)
-        index._matrix = index._to_device(matrix[:len(index.keys)])
+        index.load(n, batches)
         return index
+
+    def load(self, n: int, batches: Iterable[tuple[list[Hashable], np.ndarray]]):
+        """Loads the initial `n` vectors from batches of keys and vectors, without holding more
+        than one copy of the matrix in memory. Vectors added in the meantime take precedence."""
+        matrix = np.empty((n, self.dim), dtype=self.dtype)
+        keys = []
+        for batch_keys, vectors in batches:
+            matrix[len(keys):len(keys) + len(batch_keys)] = truncate(vectors, self.dim)
+            keys.extend(batch_keys)
+        with self._lock:
+            self.keys = keys
+            self._positions = {key: position for position, key in enumerate(keys)}
+            self._matrix = self._to_device(matrix[:len(keys)])
+        self._loaded.set()
+
+    def fail(self, error: BaseException):
+        """Marks the loading as failed, so that threads waiting for the index raise the error."""
+        self._error = error
+        self._loaded.set()
+
+    def wait_until_loaded(self) -> "VectorIndex":
+        self._loaded.wait()
+        if self._error is not None:
+            raise RuntimeError("Loading the search index failed.") from self._error
+        return self
 
     def add(self, keys: list[Hashable], vectors: np.ndarray):
         """Adds (or replaces) the vectors of the given keys."""
         if keys:
-            self._pending_keys.extend(keys)
-            self._pending_vectors.append(truncate(vectors, self.dim).astype(self.dtype))
+            vectors = truncate(vectors, self.dim).astype(self.dtype)
+            with self._lock:
+                self._pending_keys.extend(keys)
+                self._pending_vectors.append(vectors)
 
     def __len__(self) -> int:
-        self._merge()
-        return len(self.keys)
+        with self._lock:
+            self._merge()
+            return len(self.keys)
 
     def scores(self, query: np.ndarray) -> np.ndarray:
         """Returns the cosine similarity of the query to each indexed vector (in the order of `keys`)."""
-        self._merge()
+        with self._lock:
+            self._merge()
+            matrix = self._matrix
         query = truncate(query, self.dim)
         if self.device == "cpu":
-            return self._matrix @ query
+            return matrix @ query
         import torch
         query = torch.from_numpy(query).to(self.device, dtype=torch.float16)
-        return (self._matrix @ query).float().cpu().numpy()
+        return (matrix @ query).float().cpu().numpy()
 
     def _merge(self):
+        """Merges the pending vectors into the index. Must be called with the lock held."""
         if not self._pending_keys:
             return
         keys, vectors = self._pending_keys, np.concatenate(self._pending_vectors)

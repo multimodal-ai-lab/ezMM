@@ -3,9 +3,10 @@ import logging
 import os
 import sqlite3
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Callable, Iterable, TypeVar
 
@@ -21,6 +22,9 @@ SCHEMA_VERSION = 3  # Stored in the DB via PRAGMA user_version (legacy per-kind 
 
 # Number of threads used to read/hash files in bulk operations (migration, deduplication, file checks)
 N_WORKERS = min(32, (os.cpu_count() or 1) + 4)
+
+BUSY_TIMEOUT = 60  # Seconds a write waits for other writers (threads or processes) to finish
+ACCESS_UPDATE_INTERVAL = timedelta(hours=1)  # Sources' last access times are updated at most this often
 
 SCHEMA = """
     CREATE TABLE IF NOT EXISTS items (
@@ -102,6 +106,15 @@ def _hash_file(path: Optional[Path]) -> Optional[tuple[str, int]]:
         return None
 
 
+class _Connection(sqlite3.Connection):
+    """SQLite connection that supports weak references (for tracking the threads' connections)."""
+
+
+def _access_threshold() -> str:
+    """Returns the time before which a source's last access time gets updated on access."""
+    return (datetime.now(timezone.utc) - ACCESS_UPDATE_INTERVAL).isoformat(timespec="seconds")
+
+
 def _decode_vector(blob: bytes, dtype: str) -> np.ndarray:
     return np.frombuffer(blob, dtype=dtype).astype(np.float32)
 
@@ -116,13 +129,18 @@ class ItemRegistry:
     path: Path  # Absolute path to the root directory of the registry
     _db_path: Path  # Path to the SQLite DB file
 
-    conn: Optional[sqlite3.Connection] = None
-    cur: Optional[sqlite3.Cursor] = None
     cache: dict[tuple[str, int], Item] = dict()
 
     def __init__(self, path: Path | str = None):
-        self._lock = threading.RLock()
+        # Each thread uses its own DB connection, so reads run in parallel and SQLite
+        # serializes the (short) write transactions, also across processes
+        self._local = threading.local()
+        self._connections: weakref.WeakSet[_Connection] = weakref.WeakSet()  # Open connections of all threads
+        self._generation = 0  # Incremented on close() to invalidate the threads' connections
+        self._initialized = False
+        self._conn_lock = threading.RLock()  # Guards connecting and closing only
         self._embedding_index: dict[tuple[str, int, str], VectorIndex] = dict()  # (model, dim, device) -> index
+        self._index_lock = threading.Lock()  # Guards the creation of indices only
         if path is None:
             path = os.getenv("EZMM")
             if path:
@@ -135,52 +153,73 @@ class ItemRegistry:
     def set_path(self, path: Path | str):
         path = Path(path)
         if not hasattr(self, "path") or path.absolute() != self.path:
-            if self.conn:
+            if self._initialized:
                 raise RuntimeError("Cannot change path for an established ezMM Item Registry.")
             self.path = path.absolute()
             self._db_path = self.path / "item_registry.db"
             self._embedding_index.clear()
 
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """The current thread's connection to the DB (opened on first use)."""
+        local = self._local
+        if getattr(local, "generation", None) != self._generation:
+            if not self._initialized:
+                self.connect()
+            if getattr(local, "generation", None) != self._generation:
+                self._open_connection()
+        return local.conn
+
+    def _open_connection(self) -> sqlite3.Connection:
+        """Opens a connection for the current thread. It gets closed when the thread ends."""
+        with self._conn_lock:
+            # Autocommit mode: transactions are managed explicitly (see _transaction)
+            conn = sqlite3.connect(self._db_path, timeout=BUSY_TIMEOUT, check_same_thread=False,
+                                   isolation_level=None, factory=_Connection)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")  # No fsync per commit; safe from corruption in WAL mode
+            self._connections.add(conn)
+            self._local.conn, self._local.generation = conn, self._generation
+            return conn
+
     def _ensure_connected(self):
-        if self.conn is None:
+        if not self._initialized:
             self.connect()
 
     def connect(self):
-        # Initialize folder, DB, and cache
-        logger.info(f"Connecting to item registry at {self.path.as_posix()}")
-        if not self.path.exists():
+        """Initializes the registry (folder and DB, incl. migration if needed)."""
+        with self._conn_lock:
+            if self._initialized:
+                return
+            logger.info(f"Connecting to item registry at {self.path.as_posix()}")
             self.path.mkdir(exist_ok=True, parents=True)
-        # Autocommit mode: transactions are managed explicitly (see _transaction)
-        self.conn = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False, isolation_level=None)
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.cur = self.conn.cursor()
-        self._init_db()
-        logger.debug(f"Successfully connected to item registry.")
+            self._open_connection()
+            self._init_db()
+            self._initialized = True
+            logger.debug(f"Successfully connected to item registry.")
 
     @contextmanager
     def _transaction(self, mode: str = "IMMEDIATE"):
-        """Runs the enclosed statements in one (write) transaction."""
-        with self._lock:
-            self._ensure_connected()
-            self.conn.execute(f"BEGIN {mode};")
-            try:
-                yield self.conn
-                self.conn.execute("COMMIT;")
-            except BaseException:
-                self.conn.execute("ROLLBACK;")
-                raise
+        """Runs the enclosed statements in one (write) transaction. Keep transactions short
+        and free of slow work (like file I/O), as they block all other writers."""
+        conn = self.conn
+        conn.execute(f"BEGIN {mode};")
+        try:
+            yield conn
+            conn.execute("COMMIT;")
+        except BaseException:
+            conn.execute("ROLLBACK;")
+            raise
 
     def _execute(self, stmt: str, params: tuple = ()) -> list[tuple]:
-        with self._lock:
-            self._ensure_connected()
-            return self.conn.execute(stmt, params).fetchall()
+        return self.conn.execute(stmt, params).fetchall()
 
     # ---------------------------------------------------------------------------------------------
     # Schema and migration
 
     def _init_db(self):
         """Creates the schema of a new DB or migrates a legacy DB to the current schema."""
-        with self._lock:
+        with self._conn_lock:
             version = self.conn.execute("PRAGMA user_version;").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise RuntimeError(f"The ezMM registry at {self.path.as_posix()} uses schema version {version}, "
@@ -209,8 +248,7 @@ class ItemRegistry:
         """Migrates the DB to the current schema (creates the schema for a new DB). Item IDs
         are preserved so that existing references remain valid. A backup of the old DB is
         written next to it. Does nothing if the DB is already up to date."""
-        with self._lock:
-            self._ensure_connected()
+        with self._conn_lock:
             version = self.conn.execute("PRAGMA user_version;").fetchone()[0]
             if version >= SCHEMA_VERSION:
                 return
@@ -349,9 +387,10 @@ class ItemRegistry:
 
     def get_by_source_url(self, url: str, kind: str = None) -> Optional[Item]:
         """Returns the item that originates from the given URL, or None if no such
-        item exists. Optionally restricted to a kind. Updates the source's last access time."""
+        item exists. Optionally restricted to a kind. Updates the source's last access
+        time (at most once per hour, to keep lookups free of writes)."""
         stmt = """
-            SELECT i.kind, i.id FROM sources s
+            SELECT i.kind, i.id, s.last_accessed FROM sources s
             JOIN items i ON i.row_id = s.item_row_id
             WHERE s.url = ?"""
         params = (url,)
@@ -360,8 +399,9 @@ class ItemRegistry:
             params += (kind,)
         rows = self._execute(stmt + ";", params)
         if rows:
-            with self._transaction():
-                self.conn.execute("UPDATE sources SET last_accessed = ? WHERE url = ?;", (_now(), url))
+            if rows[0][2] < _access_threshold():
+                with self._transaction():
+                    self.conn.execute("UPDATE sources SET last_accessed = ? WHERE url = ?;", (_now(), url))
             return self.get(kind=rows[0][0], identifier=rows[0][1])
 
     def get_by_sha256(self, kind: str, sha256: str) -> Optional[Item]:
@@ -422,28 +462,27 @@ class ItemRegistry:
         return rows[0][0] if rows else None
 
     def _get_item_by_id(self, kind: str, identifier: int) -> Optional[Item]:
-        with self._lock:
-            row = self.get_row(kind, identifier)
-            if row is None or kind not in KIND2ITEM:
-                return None
-            if row["canonical_id"] is not None:
-                return self.get(kind=kind, identifier=row["canonical_id"])
-            source_urls = self.get_source_urls(kind, identifier)
-            item_cls = KIND2ITEM[kind]
-            # Never rely on the `missing` flag here: the item validates its file itself
-            try:
-                item = item_cls(id=identifier,
-                                file_path=row["path"],
-                                source_url=source_urls[0] if source_urls else None)
-            except FileNotFoundError:
-                self.set_missing(kind, identifier, True)
-                raise
-            if row["missing"]:
-                self.set_missing(kind, identifier, False)
-            if row["sha256"] and item._sha256 is None:
-                item._sha256 = row["sha256"]
-            self._add_to_cache(item, identifier)
-            return item
+        # No lock needed: if threads load the same item concurrently, all get the cached instance
+        row = self.get_row(kind, identifier)
+        if row is None or kind not in KIND2ITEM:
+            return None
+        if row["canonical_id"] is not None:
+            return self.get(kind=kind, identifier=row["canonical_id"])
+        source_urls = self.get_source_urls(kind, identifier)
+        item_cls = KIND2ITEM[kind]
+        # Never rely on the `missing` flag here: the item validates its file itself
+        try:
+            item = item_cls(id=identifier,
+                            file_path=row["path"],
+                            source_url=source_urls[0] if source_urls else None)
+        except FileNotFoundError:
+            self.set_missing(kind, identifier, True)
+            raise
+        if row["missing"]:
+            self.set_missing(kind, identifier, False)
+        if row["sha256"] and item._sha256 is None:
+            item._sha256 = row["sha256"]
+        return self._add_to_cache(item, identifier)
 
     # ---------------------------------------------------------------------------------------------
     # Item insertion and updates
@@ -459,44 +498,71 @@ class ItemRegistry:
             return
 
         identifier = self._get_id_by_path(item.kind, item.file_path)
-        if identifier is None:
-            sha256 = item.sha256  # Hash outside the transaction as it may take a while
-            size = item.file_path.stat().st_size
-            now = _now()
-            with self._transaction():
-                identifier = self._get_id_by_sha256(item.kind, sha256)
-                if identifier is None:
-                    # Unknown file: create a new registry entry
-                    identifier = self.conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM items WHERE kind = ?;",
-                                                   (item.kind,)).fetchone()[0]
-                    self.conn.execute("""
-                        INSERT INTO items(kind, id, path, sha256, size, canonical_id, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, NULL, ?, ?);
-                    """, (item.kind, identifier, self._to_db_path(item.file_path), sha256, size, now, now))
-                else:
-                    self._adopt_duplicate(item, identifier)
+        if identifier is not None:
+            self.add_source_url(item.kind, identifier, item.source_url)
+            self._add_to_cache(item, identifier)
+            return identifier
 
-        self.add_source_url(item.kind, identifier, item.source_url)
+        # Do the slow work (hashing, file checks) before the transaction, which blocks all writers
+        sha256 = item.sha256
+        size = item.file_path.stat().st_size
+        duplicate = self._find_duplicate(item.kind, sha256)
+        obsolete_file = None
+        now = _now()
+        with self._transaction():
+            identifier = self._get_id_by_sha256(item.kind, sha256)
+            if identifier is None:
+                # Unknown file: create a new registry entry
+                identifier = self.conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM items WHERE kind = ?;",
+                                               (item.kind,)).fetchone()[0]
+                row_id = self.conn.execute("""
+                    INSERT INTO items(kind, id, path, sha256, size, canonical_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, NULL, ?, ?);
+                """, (item.kind, identifier, self._to_db_path(item.file_path), sha256, size, now, now)).lastrowid
+            else:
+                if duplicate is None or duplicate[0] != identifier:  # Registered concurrently in the meantime
+                    duplicate = identifier, self._from_db_path(self.get_row(item.kind, identifier)["path"])
+                obsolete_file = self._adopt_duplicate(item, *duplicate)
+                row_id = self._get_row_id(item.kind, identifier)
+            if self._link_source(row_id, item.source_url):
+                self.conn.execute("UPDATE items SET updated_at = ? WHERE row_id = ?;", (now, row_id))
+        if obsolete_file is not None:
+            obsolete_file.unlink(missing_ok=True)
+
         self._add_to_cache(item, identifier)
         return identifier
 
-    def _adopt_duplicate(self, item: Item, identifier: int):
-        """Lets the (new) item point to the file of the existing, identical item."""
-        existing_path = self._from_db_path(self.get_row(item.kind, identifier)["path"])
+    def _find_duplicate(self, kind: str, sha256: str) -> Optional[tuple[int, Optional[Path]]]:
+        """Returns the ID and file path of the registered item with the given hash, if any."""
+        identifier = self._get_id_by_sha256(kind, sha256)
+        if identifier is not None:
+            return identifier, self._from_db_path(self.get_row(kind, identifier)["path"])
+
+    def _adopt_duplicate(self, item: Item, identifier: int, existing_path: Optional[Path]) -> Optional[Path]:
+        """Lets the (new) item point to the file of the existing, identical item. Must be called
+        within a transaction. Returns the item's (temporary) file if it is obsolete now."""
         if existing_path is not None and existing_path.exists():
             logger.debug(f"File '{item.file_path.as_posix()}' is a duplicate of <{item.kind}:{identifier}>.")
+            obsolete_file = None
             if self.is_temp_path(item.file_path) and item.file_path != existing_path:
-                item.file_path.unlink(missing_ok=True)
+                obsolete_file = item.file_path  # Gets deleted after the transaction
             item.file_path = existing_path
-        else:
-            # The existing entry's file is gone, so heal it with the new file
-            self.conn.execute("UPDATE items SET path = ?, missing = 0, updated_at = ? WHERE kind = ? AND id = ?;",
-                              (self._to_db_path(item.file_path), _now(), item.kind, identifier))
+            return obsolete_file
+        # The existing entry's file is gone, so heal it with the new file
+        self.conn.execute("UPDATE items SET path = ?, missing = 0, updated_at = ? WHERE kind = ? AND id = ?;",
+                          (self._to_db_path(item.file_path), _now(), item.kind, identifier))
 
     def add_source_url(self, kind: str, identifier: int, url: Optional[str]):
-        """Records the URL as a source of the item (if not recorded yet) and
-        updates the source's last access time."""
+        """Records the URL as a source of the item (if not recorded yet) and updates
+        the source's last access time (at most once per hour)."""
         if not url:
+            return
+        # Skip the write if the source is known for this item and was accessed recently
+        known = self._execute("""
+            SELECT 1 FROM sources s JOIN items i ON i.row_id = s.item_row_id
+            WHERE s.url = ? AND i.kind = ? AND i.id = ? AND s.last_accessed >= ?;
+        """, (url, kind, identifier, _access_threshold()))
+        if known:
             return
         with self._transaction():
             row_id = self._get_row_id(kind, identifier)
@@ -689,26 +755,36 @@ class ItemRegistry:
             from ezmm.embedding import get_index_device
             device = get_index_device()
         key = (model, dim, device)
-        with self._lock:
+        with self._index_lock:  # Only guards the creation, the loading happens without lock
             index = self._embedding_index.get(key)
-            if index is None:
-                index = self._embedding_index[key] = self._build_index(model, dim, device)
-            return index
+            load = index is None
+            if load:
+                # Register the (empty) index first, so embeddings added while loading get added to it
+                index = self._embedding_index[key] = VectorIndex(dim, device)
+        if load:
+            try:
+                self._load_index(index, model)
+            except BaseException as e:
+                self._embedding_index.pop(key, None)
+                index.fail(e)
+                raise
+        return index.wait_until_loaded()
 
-    def _build_index(self, model: str, dim: int, device: str) -> VectorIndex:
-        logger.info(f"Loading embeddings into the search index ({device}, {dim} dimensions)...")
-        n = self.count_embedded(model)
-        cursor = self.conn.execute("""
-            SELECT i.kind, i.id, e.vector, e.dtype FROM embeddings e JOIN items i ON i.row_id = e.item_row_id
-            WHERE e.model = ? AND i.canonical_id IS NULL ORDER BY i.row_id;
-        """, (model,))
+    def _load_index(self, index: VectorIndex, model: str):
+        logger.info(f"Loading embeddings into the search index ({index.device}, {index.dim} dimensions)...")
+        with self._transaction("DEFERRED"):  # One consistent snapshot of the DB
+            n = self.count_embedded(model)
+            cursor = self.conn.execute("""
+                SELECT i.kind, i.id, e.vector, e.dtype FROM embeddings e JOIN items i ON i.row_id = e.item_row_id
+                WHERE e.model = ? AND i.canonical_id IS NULL ORDER BY i.row_id;
+            """, (model,))
 
-        def batches():
-            while rows := cursor.fetchmany(65536):
-                yield ([(kind, identifier) for kind, identifier, _, _ in rows],
-                       np.stack([_decode_vector(vector, dtype)[:dim] for _, _, vector, dtype in rows]))
+            def batches():
+                while rows := cursor.fetchmany(65536):
+                    yield ([(kind, identifier) for kind, identifier, _, _ in rows],
+                           np.stack([_decode_vector(vector, dtype)[:index.dim] for _, _, vector, dtype in rows]))
 
-        return VectorIndex.build(dim, device, n, batches())
+            index.load(n, batches())
 
     def search(self, vector: np.ndarray, model: str, kind: str = None, limit: int = 48,
                include_missing: bool = False, exclude: tuple[str, int] = None, device: str = None) -> list[dict]:
@@ -805,22 +881,25 @@ class ItemRegistry:
         None if it is not in the cache."""
         return self.cache.get((kind, identifier))
 
-    def _add_to_cache(self, item: Item, identifier: int) -> None:
-        """Adds the given item to the cache (keeps an already cached instance)."""
-        self.cache.setdefault((item.kind, identifier), item)
+    def _add_to_cache(self, item: Item, identifier: int) -> Item:
+        """Adds the given item to the cache. Keeps and returns an already cached instance
+        (e.g., if another thread loaded the same item concurrently)."""
+        return self.cache.setdefault((item.kind, identifier), item)
         # TODO: Specify a maximum cache size and evict old items
 
     def close(self):
-        if self.conn:
-            self.conn.close()
-        self.conn = None
-        self.cur = None
+        """Closes the connections of all threads."""
+        with self._conn_lock:
+            for conn in list(self._connections):
+                conn.close()
+            self._connections.clear()
+            self._generation += 1
+            self._initialized = False
 
     def reset(self):
         """Reopens the connection to the DB and clears the cache. No persistent
         data will be deleted."""
-        if self.conn:
-            self.close()
+        self.close()
         self.clear_cache()
         self.connect()
 
