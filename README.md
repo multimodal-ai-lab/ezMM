@@ -55,7 +55,7 @@ All items can be created from a file path or from binary data, e.g., `Audio(bina
 ## Item Registry
 ezMM keeps track of all items in a registry (an SQLite DB plus media files) located at `temp/` or at the path specified by the `EZMM` environment variable (or `set_ezmm_path()`).
 - **Deduplication:** Identical files (same kind and byte-identical content, incl. embedded metadata) collapse to the same item and reference. Each item keeps all its source URLs (`item.source_urls`). To find an item by URL, use `item_registry.get_by_source_url(url)`.
-- **Cleanup:** `python -m ezmm dedup [--dry-run]` removes duplicates from existing registries. References to removed duplicates keep resolving to the remaining item.
+- **Cleanup:** `python -m ezmm dedup [--dry-run]` removes duplicates from existing registries. Files without a stored hash get hashed first; hashes are saved along the way (also with `--dry-run`, which otherwise changes nothing), so an interrupted run resumes where it stopped. References to removed duplicates keep resolving to the remaining item.
 - **Parallel use:** The registry can be used from many threads and processes at once. Each thread uses its own DB connection, so reads run in parallel and only short write transactions are serialized.
 - **Missing files:** The registry remembers which items' files are missing (used by the web UI to hide them). Run `python -m ezmm check` to re-check all files, e.g., after moving or deleting files outside of ezMM.
 - **Migration:** Registries created with older ezMM versions are migrated automatically on first use (a backup `item_registry.v<version>.bak.db` is kept). Older ezMM versions cannot read migrated registries.
@@ -105,6 +105,9 @@ The model runs on the GPU automatically if PyTorch detects one (in bfloat16), ot
   pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "torch[device-gfx1201]==2.14.0+rocm10.1.0" "torchvision[device-gfx1201]==0.29.0a0+rocm10.1.0"
   ```
   ROCm GPUs are addressed like CUDA devices (`cuda`) in PyTorch, so no further configuration is needed.
+
+### Progress bars
+Long-running operations (migration, file checks, deduplication, bulk embedding) show progress bars on stderr, also when called from Python. Set the environment variable `TQDM_DISABLE=1` to hide them.
 
 ## Web UI
 Install with `pip install ezmm[ui]` and run

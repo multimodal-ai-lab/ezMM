@@ -16,7 +16,7 @@ import numpy as np
 
 from ezmm.common.items import KIND2ITEM, Item
 from ezmm.common.vector_index import VectorIndex
-from ezmm.util import parse_ref
+from ezmm.util import parse_ref, progress_bar
 
 logger = logging.getLogger("ezMM")
 
@@ -26,6 +26,7 @@ SCHEMA_VERSION = 3  # Stored in the DB via PRAGMA user_version (legacy per-kind 
 N_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 
 DEDUP_BATCH_SIZE = 1000  # Groups of duplicates removed per transaction
+HASH_BATCH_SIZE = 1000  # Hashes saved per transaction during deduplication (makes it resumable)
 BUSY_TIMEOUT = 60  # Seconds a write waits for other writers (threads or processes) to finish
 ACCESS_UPDATE_INTERVAL = timedelta(hours=1)  # Sources' last access times are updated at most this often
 
@@ -89,20 +90,18 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 
-def _parallel_map(fn: Callable[[T], R], inputs: Iterable[T], label: str | None = None,
-                  on_progress: Callable[[int, int], None] | None = None) -> list[R]:
+def _parallel_map(fn: Callable[[T], R], inputs: Iterable[T],
+                  on_progress: Callable[[int], None] | None = None) -> list[R]:
     """Applies the (I/O-bound) function to all inputs using a thread pool, preserving the order.
     Hashing releases the GIL, so file reading and hashing run truly in parallel. Calls
-    `on_progress(done, total)` after each input."""
+    `on_progress(done)` after each input."""
     inputs = list(inputs)
     results = []
     with ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
         for i, result in enumerate(pool.map(fn, inputs) if len(inputs) > 1 else map(fn, inputs), start=1):
             results.append(result)
             if on_progress:
-                on_progress(i, len(inputs))
-            elif label and i % 1000 == 0:
-                logger.info(f"{label}: {i}/{len(inputs)} files processed...")
+                on_progress(i)
     return results
 
 
@@ -305,8 +304,10 @@ class ItemRegistry:
                 logger.warning(f"File of <{kind}:{identifier}> not found at '{path.as_posix()}'.")
             return healed or path
 
-        paths = _parallel_map(heal, rows)
-        hashes = _parallel_map(_hash_file, paths, label="Migration")
+        with progress_bar("Migration: checking files", len(rows)) as update:
+            paths = _parallel_map(heal, rows, on_progress=update)
+        with progress_bar("Migration: hashing", len(paths)) as update:
+            hashes = _parallel_map(_hash_file, paths, on_progress=update)
 
         now = _now()
         with self._transaction("EXCLUSIVE"):
@@ -329,7 +330,8 @@ class ItemRegistry:
         logger.info(f"Migrating ezMM registry at {self.path.as_posix()} to schema v{SCHEMA_VERSION}...")
         self._backup(2)
         rows = self.conn.execute("SELECT row_id, path FROM items WHERE canonical_id IS NULL;").fetchall()
-        exists = _parallel_map(_exists, [self._from_db_path(path) for _, path in rows])
+        with progress_bar("Migration: checking files", len(rows)) as update:
+            exists = _parallel_map(_exists, [self._from_db_path(path) for _, path in rows], on_progress=update)
         with self._transaction("EXCLUSIVE"):
             if self.conn.execute("PRAGMA user_version;").fetchone()[0] >= SCHEMA_VERSION:
                 return  # Another process migrated the DB in the meantime
@@ -614,7 +616,8 @@ class ItemRegistry:
         """Checks for all items whether their file exists and updates the `missing` flags
         accordingly. Returns the number of checked and missing files."""
         rows = self._execute("SELECT row_id, path, missing FROM items WHERE canonical_id IS NULL;")
-        exists = _parallel_map(_exists, [self._from_db_path(path) for _, path, _ in rows], label="File check")
+        with progress_bar("Checking files", len(rows)) as update:
+            exists = _parallel_map(_exists, [self._from_db_path(path) for _, path, _ in rows], on_progress=update)
         changes = [(int(not e), row_id) for (row_id, _, missing), e in zip(rows, exists) if bool(missing) == e]
         with self._transaction():
             self.conn.executemany("UPDATE items SET missing = ? WHERE row_id = ?;", changes)
@@ -634,25 +637,33 @@ class ItemRegistry:
         aliases of it so that their references remain resolvable. Duplicate files are
         deleted only if they are located inside the registry. Returns a report.
 
-        Calls `on_progress(phase, done, total)` to report the progress of the phases
-        'Hashing', 'Checking files', and 'Deduplicating'. Files are read and checked in
-        parallel; the DB work takes O(N + D log N) for N items and D duplicates."""
+        With `dry_run=True`, items and files remain unchanged; only the reported duplicates
+        are determined. Missing file hashes get computed and saved in both modes, as they
+        merely describe the files' contents.
+
+        Shows progress bars of the phases 'Hashing', 'Checking files', and 'Deduplicating' and
+        reports their progress to the optional `on_progress(phase, done, total)` callback.
+        Files are read and checked in parallel; the DB work takes O(N + D log N) for N items
+        and D duplicates. Hashes are saved in batches, so an interrupted run resumes hashing
+        where it stopped."""
         report = dict(hashed=0, groups=0, removed=[], freed_bytes=0, deleted_files=[])
 
-        def progress(phase: str):
-            return (lambda done, total: on_progress(phase, done, total)) if on_progress else None
-
         # Backfill missing hashes (in parallel)
-        unhashed = self._execute("SELECT row_id, path FROM items WHERE canonical_id IS NULL AND sha256 IS NULL;")
-        hashes = _parallel_map(_hash_file, [self._from_db_path(path) for _, path in unhashed], label="Hashing",
-                               on_progress=progress("Hashing"))
-        updates = [(sha256, size, _now(), row_id) for (row_id, _), (sha256, size) in
-                   ((row, hashed) for row, hashed in zip(unhashed, hashes) if hashed)]
-        report["hashed"] = len(updates)
-        if updates and not dry_run:
-            with self._transaction():
-                self.conn.executemany("UPDATE items SET sha256 = ?, size = ?, missing = 0, updated_at = ? "
-                                      "WHERE row_id = ?;", updates)
+        unhashed = self._execute("SELECT row_id, path FROM items "
+                                 "WHERE canonical_id IS NULL AND sha256 IS NULL ORDER BY row_id;")
+        with progress_bar("Hashing", len(unhashed), on_progress=on_progress) as update:
+            for start in range(0, len(unhashed), HASH_BATCH_SIZE):
+                batch = unhashed[start:start + HASH_BATCH_SIZE]
+                hashes = _parallel_map(_hash_file, [self._from_db_path(path) for _, path in batch],
+                                       on_progress=lambda done, start=start: update(start + done))
+                now = _now()
+                updates = [(hashed[0], hashed[1], now, row_id)
+                           for (row_id, _), hashed in zip(batch, hashes, strict=True) if hashed]
+                report["hashed"] += len(updates)
+                if updates:  # Saved also in dry runs: hashes describe the files and spare later runs the work
+                    with self._transaction():
+                        self.conn.executemany("UPDATE items SET sha256 = ?, size = ?, missing = 0, updated_at = ? "
+                                              "WHERE row_id = ?;", updates)
 
         # All items having duplicates, grouped by content, the item with the lowest ID first
         rows = self._execute("""
@@ -667,8 +678,8 @@ class ItemRegistry:
 
         # Check which files exist (in parallel and outside of any transaction, as it may be slow)
         paths = {row_id: self._from_db_path(path) for row_id, _, _, path, _, _ in rows}
-        exists = dict(zip(paths, _parallel_map(_exists, list(paths.values()), label="Checking files",
-                                               on_progress=progress("Checking files")), strict=True))
+        with progress_bar("Checking files", len(paths), on_progress=on_progress) as update:
+            exists = dict(zip(paths, _parallel_map(_exists, list(paths.values()), on_progress=update), strict=True))
 
         # Decide which file to keep per group: prefer an existing file inside the registry, then any existing file
         plan = []  # (kind, keeper row ID, keeper ID, keeper path, keeper file exists, duplicates)
@@ -689,6 +700,16 @@ class ItemRegistry:
             return report
 
         # Turn the duplicates into aliases, in batches of groups per (short) transaction
+        with progress_bar("Deduplicating", len(plan), unit="group", on_progress=on_progress) as update:
+            self._remove_duplicates(plan, update)
+
+        for path in to_delete:
+            path.unlink(missing_ok=True)
+        self.clear_cache()  # Cached objects of removed duplicates are outdated now
+        return report
+
+    def _remove_duplicates(self, plan: list[tuple], update: Callable[[int], None]):
+        """Turns the duplicates of the plan (see `deduplicate()`) into aliases of the kept items."""
         for start in range(0, len(plan), DEDUP_BATCH_SIZE):
             batch, now = plan[start:start + DEDUP_BATCH_SIZE], _now()
             duplicates = [(kind, keeper_row_id, keeper_id, dup_row_id, dup_id)
@@ -708,13 +729,7 @@ class ItemRegistry:
                 self.conn.executemany("UPDATE items SET path = ?, missing = ?, updated_at = ? WHERE row_id = ?;",
                                       [(self._to_db_path(keeper_path), int(not keeper_exists), now, keeper_row_id)
                                        for _, keeper_row_id, _, keeper_path, keeper_exists, _ in batch])
-            if on_progress:
-                on_progress("Deduplicating", start + len(batch), len(plan))
-
-        for path in to_delete:
-            path.unlink(missing_ok=True)
-        self.clear_cache()  # Cached objects of removed duplicates are outdated now
-        return report
+            update(start + len(batch))
 
     # ---------------------------------------------------------------------------------------------
     # Embeddings

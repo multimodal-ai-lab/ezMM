@@ -7,66 +7,7 @@
 """
 import argparse
 import os
-import sys
-import time
 from pathlib import Path
-from typing import Self
-
-
-class ProgressBar:
-    """A dependency-free progress bar on stderr with one line per phase. Use it as the
-    `on_progress(phase, done, total)` callback of long-running operations. If stderr is
-    not a terminal (e.g., redirected to a log file), it prints a line per 10% instead."""
-
-    def __init__(self, width: int = 30, min_interval: float = 0.1):
-        self.width = width
-        self.min_interval = min_interval  # Seconds between redraws
-        self.interactive = sys.stderr.isatty()
-        self.phase = None
-        self.start = self.last_draw = 0.0
-        self.last_decile = -1
-
-    def __call__(self, phase: str, done: int, total: int):
-        now = time.monotonic()
-        if phase != self.phase:
-            self._end_line()
-            self.phase, self.start, self.last_draw, self.last_decile = phase, now, 0.0, -1
-        fraction = done / total if total else 1.0
-        if self.interactive:
-            if done < total and now - self.last_draw < self.min_interval:
-                return
-            filled = int(fraction * self.width)
-            bar = "#" * filled + "." * (self.width - filled)
-            sys.stderr.write(f"\r{phase:<15} [{bar}] {fraction:6.1%}  {done}/{total}  {self._eta(now, done, total)}")
-        else:
-            decile = int(fraction * 10)
-            if decile == self.last_decile:
-                return
-            self.last_decile = decile
-            sys.stderr.write(f"{phase}: {fraction:.0%} ({done}/{total}) {self._eta(now, done, total)}\n")
-        sys.stderr.flush()
-        self.last_draw = now
-
-    def _eta(self, now: float, done: int, total: int) -> str:
-        elapsed = now - self.start
-        if done >= total:
-            return f"done in {elapsed:.0f} s" + " " * 10
-        if done == 0 or elapsed < 1:
-            return ""
-        remaining = elapsed / done * (total - done)
-        return f"~{remaining / 60:.0f} min left " if remaining >= 90 else f"~{remaining:.0f} s left  "
-
-    def _end_line(self):
-        if self.phase is not None and self.interactive:
-            sys.stderr.write("\n")
-            sys.stderr.flush()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc):
-        self._end_line()
-        self.phase = None
 
 
 def main(argv: list[str] | None = None):
@@ -80,7 +21,8 @@ def main(argv: list[str] | None = None):
     ui.add_argument("--port", type=int, default=7878, help="Port to listen on (default: 7878).")
 
     dedup = commands.add_parser("dedup", help="Identify identical files and remove the duplicates.")
-    dedup.add_argument("--dry-run", action="store_true", help="Only report duplicates, change nothing.")
+    dedup.add_argument("--dry-run", action="store_true", help="Only report duplicates, change no items or files "
+                                                                "(missing file hashes get computed and saved).")
     dedup.add_argument("--verbose", action="store_true", help="List all removed duplicates (default: the first 20).")
 
     migrate = commands.add_parser("migrate", help="Migrate a legacy registry DB to the current schema.")
@@ -112,8 +54,7 @@ def main(argv: list[str] | None = None):
         run_server(host=args.host, port=args.port)
 
     elif args.command == "dedup":
-        with ProgressBar() as progress:
-            report = item_registry.deduplicate(dry_run=args.dry_run, on_progress=progress)
+        report = item_registry.deduplicate(dry_run=args.dry_run)  # Shows progress bars
         prefix = "[DRY RUN] Would remove" if args.dry_run else "Removed"
         shown = report["removed"] if args.verbose else report["removed"][:20]
         for kind, dup_id, keeper_id in shown:
@@ -134,23 +75,11 @@ def main(argv: list[str] | None = None):
               f"({result['changed']} flags updated).")
 
     elif args.command == "embed":
-        from time import time
-
         from ezmm.embedding import INSTALL_HINT, MODEL_NAME, embed_registry, is_available
         if not is_available():
             parser.exit(1, INSTALL_HINT + "\n")
         print(f"Embedding {item_registry.count_unembedded(MODEL_NAME)} items with {MODEL_NAME}...")
-        start, last_print = time(), 0
-
-        def on_progress(done: int, total: int, failed: int):
-            nonlocal last_print
-            if time() - last_print > 10 or done == total:
-                rate = done / (time() - start)
-                print(f"  {done}/{total} items processed ({failed} failed, {rate:.1f} items/s, "
-                      f"~{(total - done) / rate / 60:.0f} min left)")
-                last_print = time()
-
-        result = embed_registry(kind=args.kind, on_progress=on_progress)
+        result = embed_registry(kind=args.kind)  # Shows a progress bar
         print(f"Embedded {result['embedded']} items ({result['failed']} failed).")
 
 

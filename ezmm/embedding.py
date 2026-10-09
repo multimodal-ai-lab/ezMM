@@ -22,6 +22,7 @@ from PIL import Image as PillowImageModule
 from PIL.Image import Image as PillowImage
 
 from ezmm.common.vector_index import truncate
+from ezmm.util import progress_bar
 
 logger = logging.getLogger("ezMM")
 
@@ -303,26 +304,29 @@ def _encode_batched(inputs: list[str | dict | Exception]) -> list[np.ndarray | E
 def embed_registry(kind: str | None = None, n_workers: int = N_WORKERS, chunk_size: int = CHUNK_SIZE,
                    on_progress: Callable[[int, int, int], None] | None = None) -> dict:
     """Embeds all items of the registry (optionally only of the given kind) that are not
-    embedded yet, see `embed_files()`. Calls `on_progress(done, total, failed)` after each
-    chunk. Returns the number of embedded and failed items."""
+    embedded yet, see `embed_files()`. Shows a progress bar and calls the optional
+    `on_progress(done, total, failed)` after each chunk. Returns the number of embedded
+    and failed items."""
     from ezmm.common.registry import item_registry
     todo = sorted(item_registry.list_unembedded(MODEL_NAME, kind=kind))  # Group kinds for larger batches
     files = ((item_registry.get_row(k, identifier)["path"], k) for k, identifier in todo)
     done, failed, buffer = 0, 0, []
-    for (k, identifier), result in zip(todo, embed_files(files, n_workers, chunk_size, dim=MODEL_DIM)):
-        done += 1
-        if isinstance(result, Exception):
-            failed += 1
-            logger.warning(f"Could not embed <{k}:{identifier}>: {result}")
-            if isinstance(result, FileNotFoundError):
-                item_registry.set_missing(k, identifier, True)
-        else:
-            buffer.append((k, identifier, result))
-        if done % chunk_size == 0 or done == len(todo):
-            item_registry.set_embeddings(MODEL_NAME, buffer)
-            buffer = []
-            if on_progress:
-                on_progress(done, len(todo), failed)
+    with progress_bar("Embedding", len(todo), unit="item") as update:
+        for (k, identifier), result in zip(todo, embed_files(files, n_workers, chunk_size, dim=MODEL_DIM)):
+            done += 1
+            if isinstance(result, Exception):
+                failed += 1
+                logger.warning(f"Could not embed <{k}:{identifier}>: {result}")
+                if isinstance(result, FileNotFoundError):
+                    item_registry.set_missing(k, identifier, True)
+            else:
+                buffer.append((k, identifier, result))
+            if done % chunk_size == 0 or done == len(todo):
+                item_registry.set_embeddings(MODEL_NAME, buffer)
+                buffer = []
+                update(done)
+                if on_progress:
+                    on_progress(done, len(todo), failed)
     return dict(embedded=done - failed, failed=failed)
 
 

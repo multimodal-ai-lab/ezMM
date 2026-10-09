@@ -35,12 +35,12 @@ def test_dedup_lists_first_duplicates(capsys):
     assert "Removed 29 duplicates in 1 groups" in out
 
 
-def test_progress_bar_log_output(capsys):
-    from ezmm.__main__ import ProgressBar
-    with ProgressBar() as progress:
-        for i in range(1, 101):
-            progress("Hashing", i, 100)
-        progress("Deduplicating", 1, 1)
-    lines = capsys.readouterr().err.strip().split("\n")  # Not a terminal: a line at the start and per 10%
-    expected = ["Hashing: 1%"] + [f"Hashing: {p}%" for p in range(10, 101, 10)] + ["Deduplicating: 100%"]
-    assert [line.split(" (")[0] for line in lines] == expected
+def test_dedup_shows_progress_bars(capsys):
+    from tests.test_dedup import _insert_items
+    item_registry.connect()
+    _insert_items([(i, f"image/{i}.jpg", None if i <= 3 else "same", None) for i in range(1, 7)])
+    main(["--path", str(item_registry.path), "dedup"])
+    err = capsys.readouterr().err
+    for phase in ("Hashing", "Checking files", "Deduplicating"):
+        assert phase in err
+    assert "3/3" in err  # tqdm's counter of the hashing phase

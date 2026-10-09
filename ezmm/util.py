@@ -2,11 +2,32 @@ import base64
 import re
 import subprocess
 import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 
 import imageio_ffmpeg as ffmpeg
 from PIL.Image import Image as PillowImage
+
+
+@contextmanager
+def progress_bar(description: str, total: int, unit: str = "file",
+                 on_progress: Callable[[str, int, int], None] | None = None) -> Iterator[Callable[[int], None]]:
+    """Shows a progress bar (tqdm, on stderr) while the enclosed work runs. Yields a function
+    `update(done)` that advances the bar to `done` and reports the progress to the optional
+    `on_progress(description, done, total)` callback. Set the environment variable
+    TQDM_DISABLE=1 to hide all progress bars."""
+    from tqdm import tqdm
+    # Pass `disable` only if needed, so that the TQDM_DISABLE environment variable takes effect
+    options = dict(disable=True) if total == 0 else {}
+    with tqdm(total=total, desc=description, unit=unit, dynamic_ncols=True, mininterval=0.5, **options) as bar:
+        def update(done: int):
+            bar.update(done - bar.n)
+            if on_progress:
+                on_progress(description, done, total)
+
+        yield update
 
 
 def get_item_refs(text: str) -> list[str]:
