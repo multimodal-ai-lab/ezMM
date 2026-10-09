@@ -82,9 +82,9 @@ seq.embedding                            # Average of the embeddings of the full
 | `Image` | the image                                                                                    |
 | `Video` | frames sampled at 1 fps (max. 32) together with the audio track                              |
 | `Audio` | the first 5 minutes of the audio (mono, 16 kHz)                                              |
-| `File`  | PDFs: images of the first 8 pages; text files: their text; other files: their file name      |
+| `File`  | file name and textual content: text files (any common encoding), Office and OpenDocument documents (docx, pptx, xlsx, odt, ...), PDFs (text plus images of the first 8 pages); other files: their file name |
 
-The model (~1.5 GB) is downloaded and loaded on first use. Item embeddings are stored in the item registry, so each item gets embedded only once. Run `python -m ezmm embed` to embed all items of the registry at once, e.g., to make them searchable in the web UI.
+Text is truncated to fit into the model's context of 8,192 tokens (shared with the page images of PDFs). The model (~1.5 GB) is downloaded and loaded on first use. Item embeddings are stored in the item registry, so each item gets embedded only once. Run `python -m ezmm embed` to embed all items of the registry at once, e.g., to make them searchable in the web UI.
 
 For many items, use the bulk functions (also used by `python -m ezmm embed`): `embed_registry()` embeds all items of the registry that are not embedded yet, and `embed_files([(path, kind), ...])` embeds any files. They decode files in parallel threads while the model embeds the previously decoded files in batches of the same modality, which is several times faster than embedding items one by one.
 

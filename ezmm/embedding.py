@@ -1,11 +1,14 @@
 """Embeds text and items of any kind (images, videos, audios, and files) into one shared
 vector space using Google DeepMind's EmbeddingGemma 2. The model is loaded lazily on first use."""
+import html
 import importlib.util
 import logging
 import mimetypes
 import os
+import re
 import subprocess
 import threading
+import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
@@ -32,7 +35,10 @@ MAX_AUDIO_SECONDS = 300  # The context fits ~327 seconds of audio
 VIDEO_FPS = 1  # Frames per second sampled from videos (the model's default)
 MAX_VIDEO_FRAMES = 32  # Longer videos get sampled evenly
 MAX_PDF_PAGES = 8  # PDFs are embedded as images of their first pages
-MAX_TEXT_BYTES = 64 * 1024  # Text files are truncated to this size before embedding
+MAX_TEXT_BYTES = 64 * 1024  # Text is read up to this size (more than fits into the context) before truncation
+MAX_CONTEXT_TOKENS = 8192  # The model's context length, shared by all modalities of an input
+IMAGE_TOKENS = 282  # Context tokens per image (280 soft tokens plus begin/end of image)
+CONTEXT_RESERVE = 64  # Context tokens reserved for prompts and special tokens
 MAX_IMAGE_PIXELS = 1024 * 1024  # Larger images get downscaled (the model uses at most ~650k pixels)
 MAX_FRAME_PIXELS = 640 * 640  # Larger video frames get downscaled (the model uses at most ~320k pixels)
 
@@ -230,12 +236,15 @@ def prepare_input(path: Path | str, kind: str = None) -> str | dict:
             raise ValueError(f"Cannot compute embedding of an audio without samples: {path}")
         return {"audio": {"array": audio, "sampling_rate": AUDIO_SAMPLE_RATE}}
 
-    if path.suffix.lower() == ".pdf":
-        pages = render_pdf_pages(path)
-        if pages:
-            return {"text": "<|image|>" * len(pages), "image": pages}
-    text = read_text(path)
-    return f"title: {path.name} | text: {text if text and text.strip() else 'none'}"
+    # Any other file: its textual content (if any) and, for PDFs, images of its first pages
+    pages, text = read_pdf(path) if path.suffix.lower() == ".pdf" else ([], read_document_text(path))
+    text = (text or "").strip()
+    prefix = f"title: {path.name} | text: "
+    if pages:
+        budget = MAX_CONTEXT_TOKENS - CONTEXT_RESERVE - len(pages) * IMAGE_TOKENS - count_tokens(prefix)
+        return {"text": prefix + "<|image|>" * len(pages) + truncate_text(text, budget), "image": pages}
+    budget = MAX_CONTEXT_TOKENS - CONTEXT_RESERVE - count_tokens(prefix)
+    return prefix + (truncate_text(text, budget) or "none")
 
 
 def embed_files(files: Iterable[tuple[Path | str, str | None]], n_workers: int = N_WORKERS,
@@ -378,30 +387,112 @@ def load_audio(path: Path | str, max_seconds: float = MAX_AUDIO_SECONDS) -> np.n
     return np.frombuffer(result.stdout, dtype=np.float32)
 
 
-def render_pdf_pages(path: Path | str, max_pages: int = MAX_PDF_PAGES) -> list[PillowImage]:
-    """Renders the first pages of the PDF as images. Returns an empty list if the PDF cannot be read."""
+def read_pdf(path: Path | str, max_pages: int = MAX_PDF_PAGES,
+             max_chars: int = MAX_TEXT_BYTES) -> tuple[list[PillowImage], str]:
+    """Returns images of the first pages of the PDF and the PDF's text (of all pages, up to
+    `max_chars` characters). Returns no images and no text if the PDF cannot be read."""
     import pypdfium2
     with _pdfium_lock:  # PDFium is not thread-safe
         try:
             pdf = pypdfium2.PdfDocument(str(path))
         except pypdfium2.PdfiumError as e:
             logger.warning(f"Could not read PDF {path}: {e}")
-            return []
+            return [], ""
         try:
-            return [pdf[i].render(scale=1.5).to_pil().convert("RGB") for i in range(min(len(pdf), max_pages))]
+            pages = [pdf[i].render(scale=1.5).to_pil().convert("RGB") for i in range(min(len(pdf), max_pages))]
+            texts, n_chars = [], 0
+            for i in range(len(pdf)):
+                if n_chars >= max_chars:
+                    break
+                texts.append(pdf[i].get_textpage().get_text_range())
+                n_chars += len(texts[-1])
+            return pages, "\n".join(texts)[:max_chars]
         finally:
             pdf.close()
 
 
+def render_pdf_pages(path: Path | str, max_pages: int = MAX_PDF_PAGES) -> list[PillowImage]:
+    """Renders the first pages of the PDF as images. Returns an empty list if the PDF cannot be read."""
+    return read_pdf(path, max_pages, max_chars=0)[0]
+
+
+def read_document_text(path: Path | str) -> str | None:
+    """Returns the (beginning of the) textual content of the file: of text files in any common
+    encoding and of Office (docx, pptx, xlsx) and OpenDocument (odt, odp, ods) documents.
+    Returns None if the file has no (readable) textual content."""
+    pattern = _OFFICE_TEXT_PARTS.get(Path(path).suffix.lower())
+    if pattern:
+        try:
+            return _read_office_text(path, pattern)
+        except (zipfile.BadZipFile, OSError, KeyError) as e:
+            logger.warning(f"Could not read the text of {path}: {e}")
+            return None
+    return read_text(path)
+
+
+# Archive members holding the text of Office (OOXML) and OpenDocument files
+_OFFICE_TEXT_PARTS = {
+    ".docx": r"word/(document|footnotes|endnotes|header\d*|footer\d*)\.xml",
+    ".pptx": r"ppt/(slides/slide|notesSlides/notesSlide)\d+\.xml",
+    ".xlsx": r"xl/sharedStrings\.xml",
+    ".odt": r"content\.xml", ".odp": r"content\.xml", ".ods": r"content\.xml",
+}
+_PARAGRAPH_END = re.compile(r"</(w:p|a:p|si|text:p|text:h|table:table-cell)>")
+_SPACE_TAG = re.compile(r"<(w:tab|w:br|a:br|text:s|text:tab|text:line-break)\b[^>]*/>")
+
+
+def _read_office_text(path: Path | str, pattern: str, max_chars: int = MAX_TEXT_BYTES) -> str:
+    with zipfile.ZipFile(path) as archive:
+        names = sorted((name for name in archive.namelist() if re.fullmatch(pattern, name)),
+                       key=lambda name: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", name)])
+        texts, n_chars = [], 0
+        for name in names:  # Document order (e.g., slide2 before slide10)
+            if n_chars >= max_chars:
+                break
+            xml = archive.open(name).read(16 * max_chars).decode("utf-8", errors="ignore")
+            xml = _SPACE_TAG.sub(" ", _PARAGRAPH_END.sub("\n", xml))
+            text = html.unescape(re.sub(r"<[^>]+>", "", xml))
+            texts.append(re.sub(r"[ \t]+", " ", text).strip())
+            n_chars += len(texts[-1])
+    return "\n".join(texts)[:max_chars]
+
+
+# Byte order marks of Unicode encodings (UTF-32 before UTF-16, as they share a prefix)
+_BOMS = ((b"\xef\xbb\xbf", "utf-8"), (b"\xff\xfe\x00\x00", "utf-32-le"), (b"\x00\x00\xfe\xff", "utf-32-be"),
+         (b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be"))
+_TEXT_CONTROL_BYTES = {9, 10, 12, 13, 27}  # Tab, newlines, form feed, escape
+
+
 def read_text(path: Path | str, max_bytes: int = MAX_TEXT_BYTES) -> str | None:
-    """Returns the (beginning of the) file's content if it is a text file, else None."""
+    """Returns the (beginning of the) file's content if it is a text file, else None. Supports
+    UTF-8, UTF-16, and UTF-32 (with byte order mark), and falls back to Windows-1252 (a
+    superset of Latin-1) for text that is not valid UTF-8."""
     with open(path, "rb") as f:
         data = f.read(max_bytes)
-    if b"\x00" in data:
-        return None  # Binary file
+    for bom, encoding in _BOMS:
+        if data.startswith(bom):
+            return data[len(bom):].decode(encoding, errors="ignore")  # Ignore a truncated last character
+    # Text contains (almost) no control characters, in particular no NUL bytes
+    n_control = sum(1 for byte in data if byte < 32 and byte not in _TEXT_CONTROL_BYTES)
+    if b"\x00" in data or n_control > len(data) / 100:
+        return None
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError as e:
-        if e.start >= len(data) - 3:
+        if len(data) == max_bytes and e.start >= len(data) - 3:
             return data[:e.start].decode("utf-8")  # Truncated in the middle of a character
-        return None
+    return data.decode("cp1252", errors="replace")
+
+
+def count_tokens(text: str) -> int:
+    """Returns the number of tokens of the text, according to the model's tokenizer."""
+    return len(get_model().tokenizer(text, add_special_tokens=False)["input_ids"])
+
+
+def truncate_text(text: str, max_tokens: int) -> str:
+    """Truncates the text to at most `max_tokens` tokens of the model's tokenizer."""
+    if not text or max_tokens <= 0:
+        return ""
+    tokenizer = get_model().tokenizer
+    ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+    return text if len(ids) <= max_tokens else tokenizer.decode(ids[:max_tokens])
