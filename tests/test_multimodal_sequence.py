@@ -1,4 +1,4 @@
-from ezmm import MultimodalSequence, Image, Video
+from ezmm import Image, MultimodalSequence, Video
 
 
 def test_multimodal_sequence():

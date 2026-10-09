@@ -1,7 +1,7 @@
 """In-memory index of (normalized) embedding vectors for fast similarity search, located
 either in RAM (device 'cpu', float32) or in GPU memory (device 'cuda', float16, requires PyTorch)."""
 import threading
-from typing import Hashable, Iterable
+from collections.abc import Hashable, Iterable
 
 import numpy as np
 

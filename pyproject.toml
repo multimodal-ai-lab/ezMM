@@ -1,6 +1,6 @@
 [project]
 name = "ezMM"
-version = "0.7.1"
+version = "0.7.2"
 description = "Lightweight Python kit for easy multimodal data processing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -50,6 +50,19 @@ ezmm = "ezmm.__main__:main"
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+ignore = [
+    "BLE001",  # Broad exception catches are deliberate at error boundaries (UI, per-file errors in bulk embedding)
+    "C408",    # dict(...) calls are the preferred style for dicts with keyword keys
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Re-exports of the public API
 
 [tool.setuptools.packages.find]
 namespaces = false

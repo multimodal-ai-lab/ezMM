@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-from typing import Sequence, Iterable
-from collections.abc import Sequence as SequenceABC
+from collections.abc import Iterable, Sequence
+from typing import Self
 
 import numpy as np
 from markdown import markdown
 
-from ezmm.common.items import Image, Audio, Video, File
+from ezmm.common.items import Audio, File, Image, Video
 from ezmm.common.items.item import Item, resolve_references_from_sequence
 
 
@@ -111,7 +111,7 @@ class MultimodalSequence:
     def __radd__(self, other) -> MultimodalSequence:
         return MultimodalSequence(other, self)
 
-    def __iadd__(self, other) -> MultimodalSequence:
+    def __iadd__(self, other) -> Self:
         self.append(other)
         return self
 
@@ -151,7 +151,7 @@ class MultimodalSequence:
 
     def unique_items(self) -> set[Item]:
         """Returns the set of all items (not strings) occurring in the sequence."""
-        return set([item for item in self if isinstance(item, Item)])
+        return {item for item in self if isinstance(item, Item)}
 
     def __str__(self):
         """Turns itself into a single string where each item is replaced by its reference."""
@@ -234,7 +234,7 @@ def _flatten(
                 flattened.append(el)
             case MultimodalSequence():
                 flattened.extend(el.data)
-            case SequenceABC():  # Must come after str() case
+            case Sequence():  # Must come after str() case
                 flattened.extend(_flatten(el))
             case _:
                 raise TypeError(f"Unsupported type: {type(el)}")
@@ -242,7 +242,7 @@ def _flatten(
 
 
 if __name__ == "__main__":
-    seq = MultimodalSequence(f"Hello world! Here is an image", Image('in/garden.jpg'),
+    seq = MultimodalSequence("Hello world! Here is an image", Image('in/garden.jpg'),
                              "and another image", Image('in/roses.jpg'),
                              "and a video", Video('in/snow.mp4'))
     print(seq)

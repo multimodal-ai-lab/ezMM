@@ -3,7 +3,9 @@ from io import BytesIO
 from pathlib import Path
 
 import pillow_avif  # Keep this import for AVIF support
-from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new
+from PIL.Image import Image as PillowImage
+from PIL.Image import new as pillow_new
+from PIL.Image import open as pillow_open
 
 from ezmm.common.items.item import Item
 from ezmm.util import to_base64
@@ -21,7 +23,7 @@ class Image(Item):
                  binary_data: bytes | None = None,
                  source_url: str | None = None,
                  reference: str | None = None,
-                 id: int = None):
+                 id: int | None = None):
         assert file_path or pillow_image or binary_data or reference or id is not None
 
         if binary_data is not None:

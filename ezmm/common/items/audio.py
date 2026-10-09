@@ -24,12 +24,12 @@ class Audio(Item):
     kind = "audio"
     _info = None  # Cached mutagen stream info
 
-    def __init__(self, file_path: str | Path = None,
-                 binary_data: bytes = None,
-                 source_url: str = None,
-                 reference: str = None,
-                 id: int = None,
-                 mime_type: str = None):
+    def __init__(self, file_path: str | Path | None = None,
+                 binary_data: bytes | None = None,
+                 source_url: str | None = None,
+                 reference: str | None = None,
+                 id: int | None = None,
+                 mime_type: str | None = None):
         assert file_path or binary_data or reference or id is not None
 
         if binary_data and not hasattr(self, "id"):

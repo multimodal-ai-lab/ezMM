@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 
-def main(argv: list[str] = None):
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(prog="ezmm", description="ezMM command line tools.")
     parser.add_argument("--path", help="Root directory of the ezMM registry "
                                        "(default: EZMM environment variable or 'temp/').")
@@ -71,10 +71,10 @@ def main(argv: list[str] = None):
 
     elif args.command == "embed":
         from time import time
-        from ezmm.embedding import MODEL_NAME, embed_registry, is_available, INSTALL_HINT
+
+        from ezmm.embedding import INSTALL_HINT, MODEL_NAME, embed_registry, is_available
         if not is_available():
-            parser.exit(1, INSTALL_HINT + "
-")
+            parser.exit(1, INSTALL_HINT + "\n")
         print(f"Embedding {item_registry.count_unembedded(MODEL_NAME)} items with {MODEL_NAME}...")
         start, last_print = time(), 0
 

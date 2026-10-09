@@ -143,6 +143,7 @@ def test_check_files_clears_flag():
 
 def test_compute_sha256():
     import hashlib
+
     from ezmm.common.registry import compute_sha256
     data = Path("in/mountains.mp4").read_bytes()
     assert compute_sha256(Path("in/mountains.mp4")) == hashlib.sha256(data).hexdigest()

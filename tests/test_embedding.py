@@ -3,11 +3,10 @@ import sqlite3
 import numpy as np
 import pytest
 
-from ezmm import Image, Video, Audio, File, MultimodalSequence
-from ezmm import embedding
+from ezmm import Audio, File, Image, MultimodalSequence, Video, embedding
 from ezmm.common import item_registry
 from ezmm.common.registry import SCHEMA, SCHEMA_VERSION
-from ezmm.embedding import MODEL_NAME, MODEL_DIM, DEFAULT_DIM, embed_query, embed_text, embed_file, truncate
+from ezmm.embedding import DEFAULT_DIM, MODEL_DIM, MODEL_NAME, embed_file, embed_query, embed_text, truncate
 
 requires_embed = pytest.mark.skipif(not embedding.is_available(), reason="Requires ezmm[embed]")
 
@@ -95,7 +94,7 @@ def test_sequence_embedding_edge_cases():
     assert MultimodalSequence(roses, roses).cos_sim(MultimodalSequence(roses)) > 0.999
     assert MultimodalSequence("Just text.").embedding.shape == (DEFAULT_DIM,)
     with pytest.raises(ValueError):
-        MultimodalSequence().embedding
+        _ = MultimodalSequence().embedding
 
 
 @requires_embed
@@ -105,7 +104,7 @@ def test_registry_search():
     snow = Video("in/snow.mp4")
     tone = Audio("in/tone.wav")
     for item in (roses, tulips, snow, tone):
-        item.embedding
+        _ = item.embedding
     assert item_registry.list_unembedded(MODEL_NAME) == []
     assert item_registry.count_embedded(MODEL_NAME) == 4
 
@@ -125,7 +124,7 @@ def test_list_unembedded():
     assert set(item_registry.list_unembedded(MODEL_NAME)) == {("image", roses.id), ("video", snow.id)}
     assert item_registry.list_unembedded(MODEL_NAME, kind="video") == [("video", snow.id)]
     assert item_registry.count_unembedded(MODEL_NAME) == 2
-    roses.embedding
+    _ = roses.embedding
     assert item_registry.list_unembedded(MODEL_NAME) == [("video", snow.id)]
     assert item_registry.count_unembedded(MODEL_NAME) == 1
 
@@ -157,7 +156,7 @@ def test_embeddings_table_added_to_existing_registry():
 
     roses = Image("in/roses.jpg")
     assert item_registry.get_embedding(roses.kind, roses.id, MODEL_NAME) is None
-    roses.embedding
+    _ = roses.embedding
     assert item_registry.get_embedding(roses.kind, roses.id, MODEL_NAME) is not None
     assert item_registry._execute("PRAGMA user_version;")[0][0] == SCHEMA_VERSION
 
@@ -171,7 +170,7 @@ def test_without_embed_extra(monkeypatch):
     monkeypatch.setattr(embedding, "is_available", lambda: False)
     monkeypatch.setattr(embedding, "_model", None)
     with pytest.raises(ImportError, match=r"ezmm\[embed\]"):
-        tulips.embedding
+        _ = tulips.embedding
     with pytest.raises(ImportError, match=r"ezmm\[embed\]"):
         embed_query("roses")
     assert np.allclose(roses.embedding, 1 / np.sqrt(DEFAULT_DIM))
@@ -291,7 +290,7 @@ def test_search_index_devices(device):
 def test_search_with_default_dim():
     roses = Image("in/roses.jpg")
     snow = Video("in/snow.mp4")
-    roses.embedding, snow.embedding
+    _ = roses.embedding, snow.embedding
     query = embed_query("snow")
     assert query.shape == (DEFAULT_DIM,)
     assert item_registry.search(query, MODEL_NAME)[0]["reference"] == snow.reference

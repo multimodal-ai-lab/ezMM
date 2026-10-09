@@ -1,7 +1,7 @@
 from pathlib import Path
 from shutil import copyfile
 
-from ezmm import Image, Video, File, Item
+from ezmm import File, Image, Item, Video
 from ezmm.common import item_registry
 
 

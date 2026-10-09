@@ -3,11 +3,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from ezmm import Image, Video, Audio, File, MultimodalSequence
+from ezmm import Audio, File, Image, MultimodalSequence, Video, embedding
 from ezmm.common import item_registry
 from ezmm.ui.common import get_seq_path
 from ezmm.ui.main import app
-from ezmm import embedding
 
 requires_embed = pytest.mark.skipif(not embedding.is_available(), reason="Requires ezmm[embed]")
 
@@ -135,7 +134,7 @@ def test_search_page_empty(client):
 def test_search_by_text(client):
     roses = Image("in/roses.jpg")
     snow = Video("in/snow.mp4")
-    roses.embedding, snow.embedding
+    _ = roses.embedding, snow.embedding
     response = client.get("/search?q=red+roses")
     assert response.status_code == 200
     assert response.text.index(f'href="/item/image/{roses.id}"') < response.text.index(f'href="/item/video/{snow.id}"')
@@ -150,7 +149,7 @@ def test_search_by_text(client):
 def test_search_like_item(client):
     roses = Image("in/roses.jpg")
     tulips = Image("in/tulips.jpg")
-    roses.embedding, tulips.embedding
+    _ = roses.embedding, tulips.embedding
     assert f"/search?like=image%3A{roses.id}" in client.get(f"/item/image/{roses.id}").text
     response = client.get(f"/search?like=image:{roses.id}")
     assert response.status_code == 200
@@ -164,7 +163,7 @@ def test_search_like_item(client):
 def test_search_by_file(client, path):
     roses = Image("in/roses.jpg")
     tone = Audio("in/tone.wav")
-    roses.embedding, tone.embedding
+    _ = roses.embedding, tone.embedding
     with open(path, "rb") as f:
         response = client.post("/search", files={"file": (Path(path).name, f)})
     assert response.status_code == 200

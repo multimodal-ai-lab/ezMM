@@ -4,7 +4,6 @@ import mimetypes
 import os
 from html import escape
 from pathlib import Path
-from typing import Optional
 
 from ezmm.common.items.item import Item
 
@@ -17,17 +16,17 @@ class FileTooLargeError(ValueError):
     """Raised when a file exceeds the maximum file size allowed for File items."""
 
 
-def _read_max_file_size_env() -> Optional[int]:
+def _read_max_file_size_env() -> int | None:
     value = os.getenv("EZMM_MAX_FILE_SIZE")
     if value is None:
         return DEFAULT_MAX_FILE_SIZE
     return None if value.strip().lower() in ("", "none", "0") else int(value)
 
 
-_max_file_size: Optional[int] = _read_max_file_size_env()
+_max_file_size: int | None = _read_max_file_size_env()
 
 
-def set_max_file_size(n_bytes: Optional[int]):
+def set_max_file_size(n_bytes: int | None):
     """Sets the maximum size (in bytes) of files that can be loaded as File items.
     Use None to disable the limit. Can also be set via the EZMM_MAX_FILE_SIZE
     environment variable. Default: 100 MB."""
@@ -37,7 +36,7 @@ def set_max_file_size(n_bytes: Optional[int]):
     _max_file_size = n_bytes
 
 
-def get_max_file_size() -> Optional[int]:
+def get_max_file_size() -> int | None:
     return _max_file_size
 
 
@@ -53,13 +52,13 @@ class File(Item):
     with a `FileTooLargeError`."""
     kind = "file"
 
-    def __init__(self, file_path: str | Path = None,
-                 binary_data: bytes = None,
-                 source_url: str = None,
-                 reference: str = None,
-                 id: int = None,
-                 mime_type: str = None,
-                 suffix: str = None):
+    def __init__(self, file_path: str | Path | None = None,
+                 binary_data: bytes | None = None,
+                 source_url: str | None = None,
+                 reference: str | None = None,
+                 id: int | None = None,
+                 mime_type: str | None = None,
+                 suffix: str | None = None):
         assert file_path or binary_data or reference or id is not None
 
         if binary_data and not hasattr(self, "id"):

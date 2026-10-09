@@ -3,8 +3,7 @@ from shutil import copyfile
 import pytest
 from PIL import Image as PillowImage
 
-from ezmm import embedding
-from ezmm import Image, MultimodalSequence
+from ezmm import Image, MultimodalSequence, embedding
 
 
 def test_image_equality():
