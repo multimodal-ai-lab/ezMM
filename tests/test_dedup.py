@@ -150,3 +150,41 @@ def test_aliases_index():
     item_registry.connect()
     plan = item_registry._execute("EXPLAIN QUERY PLAN SELECT id FROM items WHERE kind = 'image' AND canonical_id = 1;")
     assert any("items_canonical_idx" in row[-1] for row in plan)
+
+
+def test_hashes_are_saved_in_batches(monkeypatch):
+    """An interrupted hash backfill keeps the hashes computed so far, so the next run resumes."""
+    import pytest
+
+    from ezmm.common import registry
+    item_registry.connect()
+    _insert_items([(i, f"image/{i}.jpg", None, None) for i in range(1, 8)])
+
+    def hash_file(path):
+        if path.name == "6.jpg":
+            raise RuntimeError("Interrupted")
+        return f"hash-{path.stem}", 10
+
+    monkeypatch.setattr(registry, "HASH_BATCH_SIZE", 2)
+    monkeypatch.setattr(registry, "_hash_file", hash_file)
+    with pytest.raises(RuntimeError):
+        item_registry.deduplicate()
+    hashed = item_registry._execute("SELECT id FROM items WHERE sha256 IS NOT NULL ORDER BY id;")
+    assert [i for (i,) in hashed] == [1, 2, 3, 4]  # The first two batches were saved
+
+    monkeypatch.setattr(registry, "_hash_file", lambda path: (f"hash-{path.stem}", 10))
+    assert item_registry.deduplicate()["hashed"] == 3  # Only the remaining files get hashed
+
+
+def test_dry_run_saves_hashes():
+    """A dry run changes no items or files, but saves the hashes it computed."""
+    img1, _, dup_path = _make_duplicates_in_registry()
+    with item_registry._transaction():
+        item_registry.conn.execute("UPDATE items SET sha256 = NULL;")
+    report = item_registry.deduplicate(dry_run=True)
+    assert report["hashed"] == 2
+    assert report["removed"] == [("image", 2, 1)]
+    assert {row[0] for row in item_registry._execute("SELECT sha256 FROM items;")} == {img1.sha256}
+    assert item_registry.get_row("image", 2)["canonical_id"] is None
+    assert dup_path.exists()
+    assert item_registry.deduplicate(dry_run=True)["hashed"] == 0  # Nothing left to hash
