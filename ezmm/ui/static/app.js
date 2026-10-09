@@ -49,6 +49,29 @@
         }
     });
 
+    // Search with a file: submit on choose or drop
+    const dropzone = document.getElementById("dropzone");
+    if (dropzone) {
+        const input = dropzone.querySelector("input[type=file]");
+        const submit = () => {
+            dropzone.classList.add("busy");
+            dropzone.querySelector("strong").textContent = "Searching with " + input.files[0].name + "…";
+            dropzone.submit();
+        };
+        input.addEventListener("change", () => input.files.length && submit());
+        ["dragenter", "dragover"].forEach((type) => dropzone.addEventListener(type, (event) => {
+            event.preventDefault();
+            dropzone.classList.add("dragover");
+        }));
+        ["dragleave", "drop"].forEach((type) => dropzone.addEventListener(type, () => dropzone.classList.remove("dragover")));
+        dropzone.addEventListener("drop", (event) => {
+            event.preventDefault();
+            if (!event.dataTransfer.files.length) return;
+            input.files = event.dataTransfer.files;
+            submit();
+        });
+    }
+
     // Preview videos on hover
     document.querySelectorAll(".card video").forEach((video) => {
         const card = video.closest(".card");

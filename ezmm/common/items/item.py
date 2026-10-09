@@ -24,7 +24,7 @@ class Item(ABC):
     source_url: str  # The (web or file) URL pointing at the Item data's origin
 
     _sha256: str = None  # Cached SHA-256 hash of the item's file
-    _embedding: np.ndarray = None  # Cached CLIP embedding of the item file
+    _embedding: np.ndarray = None  # Cached (full) embedding of the item file
 
     def __new__(cls, file_path: Path | str = None, source_url: str = None, reference: str = None,
                 id: int = None, **kwargs):
@@ -172,21 +172,29 @@ class Item(ABC):
 
     @property
     def embedding(self) -> np.ndarray:
-        """Returns the CLIP embedding of the item.
-        TODO: Make this persistent in the item registry."""
-        if self._embedding is not None:
-            return self._embedding
-        self._embedding = self._compute_embedding()
-        return self._embedding
+        """Returns the (normalized) embedding of the item, computed with EmbeddingGemma 2, in the
+        configured dimension (see `ezmm.embedding.set_embedding_dim()`). The full embeddings are
+        stored in the item registry, so each item is embedded only once."""
+        from ezmm.embedding import MODEL_NAME, get_embedding_dim, truncate
+        if self._embedding is None:
+            from ezmm.common.registry import item_registry
+            embedding = item_registry.get_embedding(self.kind, self.id, MODEL_NAME)
+            if embedding is None:
+                embedding = self._compute_embedding()
+                item_registry.set_embedding(self.kind, self.id, MODEL_NAME, embedding)
+            self._embedding = embedding
+        return truncate(self._embedding, get_embedding_dim())
 
     def _compute_embedding(self) -> np.ndarray:
-        """Computes the CLIP embedding of the item."""
-        raise NotImplementedError
+        """Computes the full embedding of the item's file."""
+        from ezmm.embedding import embed_file, MODEL_DIM
+        return embed_file(self.file_path, self.kind, dim=MODEL_DIM)
 
-    def cos_sim(self, other: "Item") -> float:
-        """Computes the cosine similarity between this item and another."""
-        return (np.dot(self.embedding, other.embedding) /
-                (np.linalg.norm(self.embedding) * np.linalg.norm(other.embedding)))
+    def cos_sim(self, other: "Item | np.ndarray") -> float:
+        """Computes the cosine similarity between this item and another item,
+        MultimodalSequence, or embedding vector."""
+        from ezmm.embedding import cos_sim
+        return cos_sim(self.embedding, getattr(other, "embedding", other))
 
     def _write_temp_file(self, data: bytes, suffix: str) -> Path:
         """Saves the binary data into a temporary file inside the registry and returns its path."""

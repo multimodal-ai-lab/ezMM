@@ -1,7 +1,9 @@
 from shutil import copyfile
 
+import pytest
 from PIL import Image as PillowImage
 
+from ezmm import embedding
 from ezmm import Image, MultimodalSequence
 
 
@@ -34,16 +36,13 @@ def test_binary():
     print(img.file_path)
 
 
+@pytest.mark.skipif(not embedding.is_available(), reason="Requires ezmm[embed]")
 def test_similar():
     img1 = Image("in/roses.jpg")
     img2 = Image("in/roses_smaller.jpg")
     img3 = Image("in/roses_cropped.jpg")
     img4 = Image("in/tulips.jpg")
-    assert 0.99 < img1.cos_sim(img2) <= 1
-    print(img1.cos_sim(img2))
-    assert 0.95 < img1.cos_sim(img3) < 0.99
-    print(img1.cos_sim(img3))
-    assert 0.95 < img2.cos_sim(img3) < 0.99
-    print(img2.cos_sim(img3))
-    assert 0.5 < img1.cos_sim(img4) < 0.8
-    print(img1.cos_sim(img4))
+    assert 0.98 < img1.cos_sim(img2) <= 1.0001
+    assert 0.95 < img1.cos_sim(img3) <= 1.0001
+    assert 0.95 < img2.cos_sim(img3) <= 1.0001
+    assert 0.5 < img1.cos_sim(img4) < 0.85

@@ -2,7 +2,6 @@ import logging
 from io import BytesIO
 from pathlib import Path
 
-import numpy as np
 import pillow_avif  # Keep this import for AVIF support
 from PIL.Image import Image as PillowImage, open as pillow_open, new as pillow_new
 
@@ -67,10 +66,6 @@ class Image(Item):
             return f'<a href="{self.source_url}">{img}</a>'
         else:
             return img
-
-    def _compute_embedding(self) -> np.ndarray:
-        from ezmm.embedding import embed
-        return embed(self.image)
 
 
 def _ensure_rgb_mode(pillow_image: PillowImage) -> PillowImage:

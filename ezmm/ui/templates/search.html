@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% from "_macros.html" import kind_icon, item_card %}
+{% set nav = "search" %}
+{% block title %}Search · ezMM{% endblock %}
+{% block head %}{% if indexer.running %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <div>
+        <h1>Search</h1>
+        <p class="muted">Find items by meaning, across images, videos, audio, and files.</p>
+    </div>
+</section>
+
+{% if embeddings_available() %}
+<div class="search-panel">
+    <form class="semantic-search" action="/search" method="get" role="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input type="search" name="q" value="{{ q }}" placeholder="Describe what you are looking for…" autocomplete="off" autofocus>
+        {% if kind %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
+        <button class="btn primary" type="submit">Search</button>
+    </form>
+
+    <form class="dropzone" id="dropzone" action="/search" method="post" enctype="multipart/form-data">
+        {% if kind %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
+        <label>
+            <input type="file" name="file" required>
+            <span class="dropzone-icon">{{ kind_icon('file') }}</span>
+            <span><strong>Search with a file</strong>: drop an image, video, audio, or document here, or click to choose one.</span>
+        </label>
+        <noscript><button class="btn" type="submit">Search with file</button></noscript>
+    </form>
+</div>
+
+<div class="index-status muted small">
+    {% if indexer.running %}
+    <span class="spinner" aria-hidden="true"></span>
+    Indexing items… {{ indexer.done }} of {{ indexer.total }} done{% if indexer.failed %} ({{ indexer.failed }} failed){% endif %}.
+    {% else %}
+    {{ n_indexed }} item{{ 's' if n_indexed != 1 }} searchable.
+    {% if n_unindexed %}
+    <form action="/search/index" method="post" class="inline-form">
+        <input type="hidden" name="q" value="{{ q }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="like" value="{{ like }}">
+        {{ n_unindexed }} item{{ 's are' if n_unindexed != 1 else ' is' }} not indexed yet.
+        <button class="link-btn" type="submit">Index now</button>
+    </form>
+    {% endif %}
+    {% endif %}
+</div>
+{% endif %}
+
+{% if error %}<p class="alert">{{ error }}</p>{% endif %}
+
+{% if searched %}
+<div class="toolbar">
+    {% if q or like %}
+    <nav class="segmented" aria-label="Filter by kind">
+        <a href="{{ search_url(q, '', like) }}" class="{{ 'active' if not kind }}">All</a>
+        {% for k in kinds %}
+        <a href="{{ search_url(q, k, like) }}" class="{{ 'active' if kind == k }}">{{ k | capitalize }}s</a>
+        {% endfor %}
+    </nav>
+    {% endif %}
+    <span class="muted small">Most similar items to <strong>{{ query_label }}</strong></span>
+</div>
+
+{% if results %}
+<div class="grid">
+    {% for e in results %}
+    {{ item_card(e) }}
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+    <div class="empty-icon">{{ kind_icon(kind or 'file') }}</div>
+    <h2>No matches</h2>
+    <p class="muted">No {{ kind ~ ' ' if kind }}items are indexed yet.</p>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

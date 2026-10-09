@@ -1,9 +1,9 @@
 import base64
 import logging
 from pathlib import Path
-from PIL.Image import fromarray
 
 import cv2
+import mutagen
 import numpy as np
 
 from ezmm.common.items.item import Item
@@ -57,20 +57,35 @@ class Video(Item):
         return int(self._read_prop(cv2.CAP_PROP_FRAME_HEIGHT))
 
     @property
+    def has_video_stream(self) -> bool:
+        """Returns False if the file contains no video stream (e.g., an audio-only MP4)."""
+        return self.width > 0 and self.height > 0
+
+    @property
     def frame_count(self) -> int:
-        return int(self._read_prop(cv2.CAP_PROP_FRAME_COUNT))
+        """Returns the number of frames (0 if unknown or if there is no video stream)."""
+        if not self.has_video_stream:
+            return 0
+        return max(int(self._read_prop(cv2.CAP_PROP_FRAME_COUNT)), 0)
 
     @property
     def fps(self) -> float:
-        return float(self._read_prop(cv2.CAP_PROP_FPS))
+        """Returns the frame rate (0 if unknown or if there is no video stream)."""
+        if not self.has_video_stream:
+            return 0.0
+        return max(float(self._read_prop(cv2.CAP_PROP_FPS)), 0.0)
 
     @property
     def duration(self) -> float:
-        """Returns the duration of the video in seconds."""
-        fps = self.fps
-        if fps <= 0:
+        """Returns the duration of the video in seconds (also for videos without video stream)."""
+        fps, frame_count = self.fps, self.frame_count
+        if fps > 0 and frame_count > 0:
+            return frame_count / fps
+        try:  # Read the duration from the container instead
+            info = getattr(mutagen.File(self.file_path), "info", None)
+            return float(getattr(info, "length", 0.0) or 0.0)
+        except Exception:
             return 0.0
-        return self.frame_count / fps
 
     def sample_frames(self, n_frames: int = 5, *, format: str = "rgb") -> list[np.ndarray] | list[bytes]:
         """Returns ``n_frames`` frames sampled evenly from the video.
@@ -122,13 +137,3 @@ class Video(Item):
     def as_html(self) -> str:
         return f'<video controls preload="metadata" src="{self.file_url}"></video>'
 
-    def _compute_embedding(self) -> np.ndarray:
-        """Returns the average embedding of 5 equal-distance video frames."""
-        from ezmm.embedding import embed
-        frames = self.sample_frames(5, format='rgb')
-        if frames:
-            pillow_images = [fromarray(frame) for frame in frames]
-            embeddings = embed(pillow_images)
-            return np.mean(embeddings, axis=0)
-        else:
-            raise ValueError("Cannot compute embedding without video frames.")

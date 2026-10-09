@@ -1,6 +1,6 @@
 [project]
 name = "ezMM"
-version = "0.6.1"
+version = "0.7.0"
 description = "Lightweight Python kit for easy multimodal data processing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,24 +14,30 @@ dependencies = [
     "imageio-ffmpeg",
     "m3u8",
     "jinja2",
-    "fastembed",
     "mutagen",
+    "numpy",
 ]
 
 [project.optional-dependencies]
+# Embeddings with EmbeddingGemma 2 (for GPU support, see the README)
+embed = [
+    "torch",
+    "torchvision",
+    "transformers>=5.19.0",
+    "sentence-transformers>=6.1.0",
+    "pypdfium2",
+]
 ui = [
     "uvicorn~=0.51.0",
     "fastapi~=0.139.2",
     "starlette~=1.3.1",
+    "python-multipart",
 ]
 test = [
+    "ezMM[embed,ui]",
     "pytest",
     "pytest-asyncio",
     "httpx",
-    # For visual display
-    "uvicorn~=0.51.0",
-    "fastapi~=0.139.2",
-    "starlette~=1.3.1",
 ]
 
 [project.scripts]

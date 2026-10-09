@@ -7,6 +7,9 @@ from ezmm import Image, Video, Audio, File, MultimodalSequence
 from ezmm.common import item_registry
 from ezmm.ui.common import get_seq_path
 from ezmm.ui.main import app
+from ezmm import embedding
+
+requires_embed = pytest.mark.skipif(not embedding.is_available(), reason="Requires ezmm[embed]")
 
 
 @pytest.fixture
@@ -118,3 +121,92 @@ def test_only_missing_files(client, tmp_path):
     response = client.get("/")
     assert "Only items with missing files" in response.text
     assert 'href="/?missing=1"' in response.text
+
+
+@requires_embed
+def test_search_page_empty(client):
+    Image("in/roses.jpg")
+    response = client.get("/search")
+    assert response.status_code == 200
+    assert "1 item is not indexed yet" in response.text
+
+
+@requires_embed
+def test_search_by_text(client):
+    roses = Image("in/roses.jpg")
+    snow = Video("in/snow.mp4")
+    roses.embedding, snow.embedding
+    response = client.get("/search?q=red+roses")
+    assert response.status_code == 200
+    assert response.text.index(f'href="/item/image/{roses.id}"') < response.text.index(f'href="/item/video/{snow.id}"')
+    assert "chip score" in response.text
+
+    response = client.get("/search?q=red+roses&kind=video")
+    assert f'href="/item/image/{roses.id}"' not in response.text
+    assert f'href="/item/video/{snow.id}"' in response.text
+
+
+@requires_embed
+def test_search_like_item(client):
+    roses = Image("in/roses.jpg")
+    tulips = Image("in/tulips.jpg")
+    roses.embedding, tulips.embedding
+    assert f"/search?like=image%3A{roses.id}" in client.get(f"/item/image/{roses.id}").text
+    response = client.get(f"/search?like=image:{roses.id}")
+    assert response.status_code == 200
+    assert f'href="/item/image/{tulips.id}"' in response.text
+    assert f'href="/item/image/{roses.id}"' not in response.text  # The query item itself is excluded
+    assert client.get("/search?like=image:999").status_code == 404
+
+
+@requires_embed
+@pytest.mark.parametrize("path", ["in/roses_smaller.jpg", "in/tone.wav", "in/table.csv"])
+def test_search_by_file(client, path):
+    roses = Image("in/roses.jpg")
+    tone = Audio("in/tone.wav")
+    roses.embedding, tone.embedding
+    with open(path, "rb") as f:
+        response = client.post("/search", files={"file": (Path(path).name, f)})
+    assert response.status_code == 200
+    assert Path(path).name in response.text
+    assert f'href="/item/image/{roses.id}"' in response.text
+    # The query file does not get added to the registry
+    assert item_registry.count_items() == 2
+
+
+@requires_embed
+def test_search_index(client):
+    roses = Image("in/roses.jpg")
+    response = client.post("/search/index", data={"q": "roses"}, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/search?q=roses"
+    from ezmm.ui.main import indexer
+    indexer.thread.join(timeout=300)
+    assert indexer.done == indexer.total == 1
+    assert f'href="/item/image/{roses.id}"' in client.get("/search?q=roses").text
+
+
+def test_search_without_embed_extra(client, monkeypatch):
+    img = Image("in/roses.jpg")
+    monkeypatch.setattr(embedding, "is_available", lambda: False)
+    response = client.get("/search?q=roses")
+    assert response.status_code == 200
+    assert "pip install ezmm[embed]" in response.text
+    assert 'id="dropzone"' not in response.text
+    assert "Find similar items" not in client.get(f"/item/image/{img.id}").text
+
+
+def test_audio_only_video_page(client, audio_only_video):
+    vid = Video(audio_only_video)
+    response = client.get(f"/item/video/{vid.id}")
+    assert response.status_code == 200
+    assert "Audio only (no video stream)" in response.text
+    assert "0 × 0" not in response.text and "Frame rate" not in response.text
+    assert "<audio" in response.text and "<video" not in response.text
+
+
+def test_duration_format():
+    from ezmm.ui.main import _duration
+    assert _duration(734) == "12:14"
+    assert _duration(3725) == "1:02:05"
+    assert _duration(-1) == "0:00"
