@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from shutil import copyfile, move
 from typing import Sequence, Optional
+from uuid import uuid4
 
 import numpy as np
 
@@ -207,7 +208,8 @@ class Item(ABC):
         """Returns a path that can be used for temporary storage.
         Use it when the item's ID is not set yet."""
         from ezmm.common.registry import item_registry
-        filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f") + suffix
+        # Unique also for items created by parallel threads or processes at the same time
+        filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f") + f"_{uuid4().hex[:8]}" + suffix
         return (item_registry.path / "items" / filename).absolute()
 
     def _default_file_path(self) -> Path:
