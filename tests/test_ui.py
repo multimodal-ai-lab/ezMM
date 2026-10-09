@@ -194,3 +194,19 @@ def test_search_without_embed_extra(client, monkeypatch):
     assert "pip install ezmm[embed]" in response.text
     assert 'id="dropzone"' not in response.text
     assert "Find similar items" not in client.get(f"/item/image/{img.id}").text
+
+
+def test_audio_only_video_page(client, audio_only_video):
+    vid = Video(audio_only_video)
+    response = client.get(f"/item/video/{vid.id}")
+    assert response.status_code == 200
+    assert "Audio only (no video stream)" in response.text
+    assert "0 × 0" not in response.text and "Frame rate" not in response.text
+    assert "<audio" in response.text and "<video" not in response.text
+
+
+def test_duration_format():
+    from ezmm.ui.main import _duration
+    assert _duration(734) == "12:14"
+    assert _duration(3725) == "1:02:05"
+    assert _duration(-1) == "0:00"

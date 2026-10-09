@@ -20,11 +20,11 @@
         </div>
         {% elif entry.kind == 'image' %}
         <a href="{{ file_url }}" target="_blank" rel="noopener"><img src="{{ file_url }}" alt="{{ entry.reference }}"></a>
-        {% elif entry.kind == 'video' %}
+        {% elif entry.kind == 'video' and not audio_only %}
         <video src="{{ file_url }}" controls preload="metadata"></video>
-        {% elif entry.kind == 'audio' %}
+        {% elif entry.kind == 'audio' or audio_only %}
         <div class="audio-stage">
-            <span class="placeholder-icon">{{ kind_icon('audio') }}</span>
+            <span class="placeholder-icon">{{ kind_icon(entry.kind) }}</span>
             <audio src="{{ file_url }}" controls preload="metadata"></audio>
         </div>
         {% else %}

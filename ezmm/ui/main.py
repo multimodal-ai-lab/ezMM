@@ -57,8 +57,10 @@ def _host(url: str) -> str:
 
 
 def _duration(seconds: float) -> str:
-    seconds = int(round(seconds or 0))
-    return f"{seconds // 60}:{seconds % 60:02d}"
+    """Formats the duration as m:ss, or h:mm:ss for durations of an hour or more."""
+    seconds = max(int(round(seconds or 0)), 0)
+    hours, minutes = seconds // 3600, seconds // 60 % 60
+    return f"{hours}:{minutes:02d}:{seconds % 60:02d}" if hours else f"{minutes}:{seconds % 60:02d}"
 
 
 def _browse_url(kind: str = "", q: str = "", missing: bool = False, page: int = 1) -> str:
@@ -144,15 +146,21 @@ async def show_item(request: Request, kind: str, identifier: int):
     if entry["canonical_id"] is not None:
         return RedirectResponse(f"/item/{kind}/{entry['canonical_id']}")
 
-    details, error = {}, None
+    details, error, audio_only = {}, None, False
     try:
         item = item_registry.get(kind=kind, identifier=identifier)
         details["MIME type"] = item.mime_type
-        if kind in ("image", "video"):
+        if kind == "image":
             details["Dimensions"] = f"{item.width} × {item.height} px"
         if kind == "video":
+            audio_only = not item.has_video_stream
+            if audio_only:
+                details["Content"] = "Audio only (no video stream)"
+            else:
+                details["Dimensions"] = f"{item.width} × {item.height} px"
             details["Duration"] = _duration(item.duration)
-            details["Frame rate"] = f"{item.fps:.2f} fps"
+            if not audio_only and item.fps > 0:
+                details["Frame rate"] = f"{item.fps:.2f} fps"
         if kind == "audio":
             details["Duration"] = _duration(item.duration)
             details["Sample rate"] = f"{item.sample_rate / 1000:g} kHz"
@@ -171,6 +179,7 @@ async def show_item(request: Request, kind: str, identifier: int):
         "details": details,
         "error": error,
         "file_exists": file_exists,
+        "audio_only": audio_only,
         "sources": item_registry.get_sources(kind, identifier),
         "aliases": item_registry.get_aliases(kind, identifier),
     })

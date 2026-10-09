@@ -314,3 +314,11 @@ def test_index_device_detection(monkeypatch, caplog):
     assert embedding.get_index_device() == "cpu"
     with pytest.raises(ValueError):
         embedding.set_index_device("vram")
+
+
+@requires_embed
+def test_audio_only_video_embedding(audio_only_video):
+    """Videos without frames get embedded by their audio."""
+    vid = Video(audio_only_video)
+    assert vid.embedding.shape == (DEFAULT_DIM,)
+    assert vid.cos_sim(Audio("in/tone.wav")) > 0.95

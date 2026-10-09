@@ -213,10 +213,13 @@ def prepare_input(path: Path | str, kind: str = None) -> str | dict:
 
     if kind == "video":
         frames = sample_video_frames(path)
-        if not frames:
-            raise ValueError(f"Cannot compute embedding without video frames: {path}")
         audio = load_audio(path)
-        if audio is None or len(audio) == 0:
+        has_audio = audio is not None and len(audio) > 0
+        if not frames and not has_audio:
+            raise ValueError(f"Cannot compute embedding of a video without frames and audio: {path}")
+        if not frames:  # Audio-only video file: embed its audio
+            return {"audio": {"array": audio, "sampling_rate": AUDIO_SAMPLE_RATE}}
+        if not has_audio:
             return {"video": np.stack(frames)}
         return {"text": "<|video|><|audio|>", "video": np.stack(frames),
                 "audio": {"array": audio, "sampling_rate": AUDIO_SAMPLE_RATE}}
