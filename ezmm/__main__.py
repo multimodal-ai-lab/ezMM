@@ -1,13 +1,72 @@
 """Command line interface of ezMM. Usage:
     python -m ezmm ui [--path PATH] [--host HOST] [--port PORT]   # Browse the registry in the browser
-    python -m ezmm dedup [--path PATH] [--dry-run]                # Remove duplicate files from the registry
+    python -m ezmm dedup [--path PATH] [--dry-run] [--verbose]    # Remove duplicate files from the registry
     python -m ezmm migrate [--path PATH]                          # Migrate a legacy registry DB
     python -m ezmm check [--path PATH]                            # Check which items' files are missing
     python -m ezmm embed [--path PATH] [--kind KIND]              # Embed all items (for semantic search)
 """
 import argparse
 import os
+import sys
+import time
 from pathlib import Path
+from typing import Self
+
+
+class ProgressBar:
+    """A dependency-free progress bar on stderr with one line per phase. Use it as the
+    `on_progress(phase, done, total)` callback of long-running operations. If stderr is
+    not a terminal (e.g., redirected to a log file), it prints a line per 10% instead."""
+
+    def __init__(self, width: int = 30, min_interval: float = 0.1):
+        self.width = width
+        self.min_interval = min_interval  # Seconds between redraws
+        self.interactive = sys.stderr.isatty()
+        self.phase = None
+        self.start = self.last_draw = 0.0
+        self.last_decile = -1
+
+    def __call__(self, phase: str, done: int, total: int):
+        now = time.monotonic()
+        if phase != self.phase:
+            self._end_line()
+            self.phase, self.start, self.last_draw, self.last_decile = phase, now, 0.0, -1
+        fraction = done / total if total else 1.0
+        if self.interactive:
+            if done < total and now - self.last_draw < self.min_interval:
+                return
+            filled = int(fraction * self.width)
+            bar = "#" * filled + "." * (self.width - filled)
+            sys.stderr.write(f"\r{phase:<15} [{bar}] {fraction:6.1%}  {done}/{total}  {self._eta(now, done, total)}")
+        else:
+            decile = int(fraction * 10)
+            if decile == self.last_decile:
+                return
+            self.last_decile = decile
+            sys.stderr.write(f"{phase}: {fraction:.0%} ({done}/{total}) {self._eta(now, done, total)}\n")
+        sys.stderr.flush()
+        self.last_draw = now
+
+    def _eta(self, now: float, done: int, total: int) -> str:
+        elapsed = now - self.start
+        if done >= total:
+            return f"done in {elapsed:.0f} s" + " " * 10
+        if done == 0 or elapsed < 1:
+            return ""
+        remaining = elapsed / done * (total - done)
+        return f"~{remaining / 60:.0f} min left " if remaining >= 90 else f"~{remaining:.0f} s left  "
+
+    def _end_line(self):
+        if self.phase is not None and self.interactive:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc):
+        self._end_line()
+        self.phase = None
 
 
 def main(argv: list[str] | None = None):
@@ -22,6 +81,7 @@ def main(argv: list[str] | None = None):
 
     dedup = commands.add_parser("dedup", help="Identify identical files and remove the duplicates.")
     dedup.add_argument("--dry-run", action="store_true", help="Only report duplicates, change nothing.")
+    dedup.add_argument("--verbose", action="store_true", help="List all removed duplicates (default: the first 20).")
 
     migrate = commands.add_parser("migrate", help="Migrate a legacy registry DB to the current schema.")
 
@@ -52,10 +112,14 @@ def main(argv: list[str] | None = None):
         run_server(host=args.host, port=args.port)
 
     elif args.command == "dedup":
-        report = item_registry.deduplicate(dry_run=args.dry_run)
+        with ProgressBar() as progress:
+            report = item_registry.deduplicate(dry_run=args.dry_run, on_progress=progress)
         prefix = "[DRY RUN] Would remove" if args.dry_run else "Removed"
-        for kind, dup_id, keeper_id in report["removed"]:
+        shown = report["removed"] if args.verbose else report["removed"][:20]
+        for kind, dup_id, keeper_id in shown:
             print(f"  <{kind}:{dup_id}> -> <{kind}:{keeper_id}>")
+        if len(shown) < len(report["removed"]):
+            print(f"  ... and {len(report['removed']) - len(shown)} more (use --verbose to list all)")
         print(f"{prefix} {len(report['removed'])} duplicates in {report['groups']} groups, "
               f"deleting {len(report['deleted_files'])} files ({format_size(report['freed_bytes'])}). "
               f"Hashed {report['hashed']} files that had no hash yet.")

@@ -110,3 +110,43 @@ def test_deduplicate_never_deletes_files_outside_registry(tmp_path):
     item_registry.deduplicate()
     assert outside.exists()
     assert Path("in/roses.jpg").exists()
+
+
+def _insert_items(rows: list[tuple]):
+    """Inserts registry rows (id, path, sha256, canonical_id) of images directly."""
+    with item_registry._transaction():
+        item_registry.conn.executemany("""
+            INSERT INTO items(kind, id, path, sha256, size, canonical_id, created_at, updated_at)
+            VALUES ('image', ?, ?, ?, 10, ?, '2026-01-01', '2026-01-01');
+        """, rows)
+
+
+def test_deduplicate_repoints_existing_aliases():
+    """Aliases of a removed duplicate get resolved to the remaining item."""
+    item_registry.connect()
+    _insert_items([(1, "image/1.jpg", "a", None), (2, "image/2.jpg", "a", None),
+                   (3, None, "a", 2), (4, None, "a", 3), (5, "image/5.jpg", "b", None)])
+    report = item_registry.deduplicate()
+    assert report["removed"] == [("image", 2, 1)]
+    for alias in (2, 3):
+        assert item_registry.get_row("image", alias)["canonical_id"] == 1
+    assert item_registry.get_row("image", 4)["canonical_id"] == 3  # Untouched: 3 was an alias already
+    assert item_registry.get_row("image", 5)["canonical_id"] is None
+    assert item_registry.get_aliases("image", 1) == [2, 3]
+
+
+def test_deduplicate_progress():
+    item_registry.connect()
+    _insert_items([(i, f"image/{i}.jpg", str(i % 3), None) for i in range(1, 2501)])  # 3 groups
+    progress = []
+    report = item_registry.deduplicate(on_progress=lambda *args: progress.append(args))
+    assert report["groups"] == 3 and len(report["removed"]) == 2497
+    assert progress[-1] == ("Deduplicating", 3, 3)
+    checks = [p for p in progress if p[0] == "Checking files"]
+    assert len(checks) == 2500 and checks[-1] == ("Checking files", 2500, 2500)
+
+
+def test_aliases_index():
+    item_registry.connect()
+    plan = item_registry._execute("EXPLAIN QUERY PLAN SELECT id FROM items WHERE kind = 'image' AND canonical_id = 1;")
+    assert any("items_canonical_idx" in row[-1] for row in plan)
