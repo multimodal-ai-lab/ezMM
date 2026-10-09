@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from itertools import groupby
 from pathlib import Path
 from typing import TypeVar
 
@@ -24,6 +25,7 @@ SCHEMA_VERSION = 3  # Stored in the DB via PRAGMA user_version (legacy per-kind 
 # Number of threads used to read/hash files in bulk operations (migration, deduplication, file checks)
 N_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 
+DEDUP_BATCH_SIZE = 1000  # Groups of duplicates removed per transaction
 BUSY_TIMEOUT = 60  # Seconds a write waits for other writers (threads or processes) to finish
 ACCESS_UPDATE_INTERVAL = timedelta(hours=1)  # Sources' last access times are updated at most this often
 
@@ -56,6 +58,9 @@ SCHEMA = """
     CREATE INDEX IF NOT EXISTS sources_item_idx ON sources(item_row_id);
 """
 
+# Index for finding the aliases of an item (an optional addition to schema v3, created on connect)
+ALIASES_INDEX = "CREATE INDEX IF NOT EXISTS items_canonical_idx ON items(kind, canonical_id);"
+
 # Embedding vectors (normalized float32) of items, one per item and embedding model. An optional
 # addition to schema v3 (created on connect), so registries remain readable by older ezMM versions.
 EMBEDDINGS_SCHEMA = """
@@ -84,17 +89,19 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 
-def _parallel_map(fn: Callable[[T], R], inputs: Iterable[T], label: str | None = None) -> list[R]:
+def _parallel_map(fn: Callable[[T], R], inputs: Iterable[T], label: str | None = None,
+                  on_progress: Callable[[int, int], None] | None = None) -> list[R]:
     """Applies the (I/O-bound) function to all inputs using a thread pool, preserving the order.
-    Hashing releases the GIL, so file reading and hashing run truly in parallel."""
+    Hashing releases the GIL, so file reading and hashing run truly in parallel. Calls
+    `on_progress(done, total)` after each input."""
     inputs = list(inputs)
-    if len(inputs) <= 1:
-        return [fn(x) for x in inputs]
     results = []
     with ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
-        for i, result in enumerate(pool.map(fn, inputs), start=1):
+        for i, result in enumerate(pool.map(fn, inputs) if len(inputs) > 1 else map(fn, inputs), start=1):
             results.append(result)
-            if label and i % 1000 == 0:
+            if on_progress:
+                on_progress(i, len(inputs))
+            elif label and i % 1000 == 0:
                 logger.info(f"{label}: {i}/{len(inputs)} files processed...")
     return results
 
@@ -227,6 +234,7 @@ class ItemRegistry:
             if version < SCHEMA_VERSION:
                 self.migrate()
             self.conn.execute(EMBEDDINGS_SCHEMA)
+            self.conn.execute(ALIASES_INDEX)
             columns = [row[1] for row in self.conn.execute("PRAGMA table_info(embeddings);").fetchall()]
             if "dtype" not in columns:  # Added in ezMM 0.7.0 during development
                 self.conn.execute("ALTER TABLE embeddings ADD COLUMN dtype TEXT NOT NULL DEFAULT 'float32';")
@@ -618,17 +626,26 @@ class ItemRegistry:
     # ---------------------------------------------------------------------------------------------
     # Deduplication
 
-    def deduplicate(self, dry_run: bool = False) -> dict:
+    def deduplicate(self, dry_run: bool = False,
+                    on_progress: Callable[[str, int, int], None] | None = None) -> dict:
         """Goes over the entire registry, identifies identical files (same kind and same
         SHA-256 hash of the raw file bytes) and removes the duplicates: per group, the item
         with the lowest ID is kept, receives all source URLs, and the other entries become
         aliases of it so that their references remain resolvable. Duplicate files are
-        deleted only if they are located inside the registry. Returns a report."""
+        deleted only if they are located inside the registry. Returns a report.
+
+        Calls `on_progress(phase, done, total)` to report the progress of the phases
+        'Hashing', 'Checking files', and 'Deduplicating'. Files are read and checked in
+        parallel; the DB work takes O(N + D log N) for N items and D duplicates."""
         report = dict(hashed=0, groups=0, removed=[], freed_bytes=0, deleted_files=[])
+
+        def progress(phase: str):
+            return (lambda done, total: on_progress(phase, done, total)) if on_progress else None
 
         # Backfill missing hashes (in parallel)
         unhashed = self._execute("SELECT row_id, path FROM items WHERE canonical_id IS NULL AND sha256 IS NULL;")
-        hashes = _parallel_map(_hash_file, [self._from_db_path(path) for _, path in unhashed], label="Hashing")
+        hashes = _parallel_map(_hash_file, [self._from_db_path(path) for _, path in unhashed], label="Hashing",
+                               on_progress=progress("Hashing"))
         updates = [(sha256, size, _now(), row_id) for (row_id, _), (sha256, size) in
                    ((row, hashed) for row, hashed in zip(unhashed, hashes) if hashed)]
         report["hashed"] = len(updates)
@@ -637,54 +654,66 @@ class ItemRegistry:
                 self.conn.executemany("UPDATE items SET sha256 = ?, size = ?, missing = 0, updated_at = ? "
                                       "WHERE row_id = ?;", updates)
 
-        groups = self._execute("""
-            SELECT kind, sha256 FROM items
-            WHERE canonical_id IS NULL AND sha256 IS NOT NULL
-            GROUP BY kind, sha256 HAVING COUNT(*) > 1;
+        # All items having duplicates, grouped by content, the item with the lowest ID first
+        rows = self._execute("""
+            SELECT row_id, kind, id, path, size, sha256 FROM items
+            WHERE canonical_id IS NULL AND (kind, sha256) IN (
+                SELECT kind, sha256 FROM items WHERE canonical_id IS NULL AND sha256 IS NOT NULL
+                GROUP BY kind, sha256 HAVING COUNT(*) > 1)
+            ORDER BY kind, sha256, id;
         """)
+        groups = [list(group) for _, group in groupby(rows, key=lambda row: (row[1], row[5]))]
         report["groups"] = len(groups)
+
+        # Check which files exist (in parallel and outside of any transaction, as it may be slow)
+        paths = {row_id: self._from_db_path(path) for row_id, _, _, path, _, _ in rows}
+        exists = dict(zip(paths, _parallel_map(_exists, list(paths.values()), label="Checking files",
+                                               on_progress=progress("Checking files")), strict=True))
+
+        # Decide which file to keep per group: prefer an existing file inside the registry, then any existing file
+        plan = []  # (kind, keeper row ID, keeper ID, keeper path, keeper file exists, duplicates)
         to_delete: list[Path] = []
-        for kind, sha256 in groups:
+        for (keeper_row_id, kind, keeper_id, _, _, _), *duplicates in groups:
+            existing = [row[0] for row in [(keeper_row_id,), *duplicates] if exists[row[0]]]
+            kept_row_id = next((r for r in existing if self.is_inside(paths[r])), existing[0] if existing else None)
+            keeper_path = paths[kept_row_id] if kept_row_id is not None else paths[keeper_row_id]
+            for dup_row_id, _, dup_id, _, dup_size, _ in duplicates:
+                report["removed"].append((kind, dup_id, keeper_id))
+                dup_path = paths[dup_row_id]
+                if dup_path and dup_path != keeper_path and exists[dup_row_id] and self.is_inside(dup_path):
+                    to_delete.append(dup_path)
+                    report["deleted_files"].append(dup_path.as_posix())
+                    report["freed_bytes"] += dup_size or 0
+            plan.append((kind, keeper_row_id, keeper_id, keeper_path, kept_row_id is not None, duplicates))
+        if dry_run:
+            return report
+
+        # Turn the duplicates into aliases, in batches of groups per (short) transaction
+        for start in range(0, len(plan), DEDUP_BATCH_SIZE):
+            batch, now = plan[start:start + DEDUP_BATCH_SIZE], _now()
+            duplicates = [(kind, keeper_row_id, keeper_id, dup_row_id, dup_id)
+                          for kind, keeper_row_id, keeper_id, _, _, dups in batch
+                          for dup_row_id, _, dup_id, _, _, _ in dups]
             with self._transaction():
-                rows = self.conn.execute("""
-                    SELECT id, path, size FROM items
-                    WHERE kind = ? AND sha256 = ? AND canonical_id IS NULL ORDER BY id;
-                """, (kind, sha256)).fetchall()
-                (keeper_id, keeper_path, _), duplicates = rows[0], rows[1:]
-                keeper_path = self._from_db_path(keeper_path)
+                self.conn.executemany(
+                    "UPDATE sources SET item_row_id = ? WHERE item_row_id = ?;",
+                    [(keeper_row_id, dup_row_id) for _, keeper_row_id, _, dup_row_id, _ in duplicates])
+                # Aliases of a duplicate now point to the keeper (uses the index on canonical_id)
+                self.conn.executemany(
+                    "UPDATE items SET canonical_id = ?, updated_at = ? WHERE kind = ? AND canonical_id = ?;",
+                    [(keeper_id, now, kind, dup_id) for kind, _, keeper_id, _, dup_id in duplicates])
+                self.conn.executemany("UPDATE items SET canonical_id = ?, path = NULL, updated_at = ? "
+                                      "WHERE row_id = ? AND canonical_id IS NULL;",
+                                      [(keeper_id, now, dup_row_id) for _, _, keeper_id, dup_row_id, _ in duplicates])
+                self.conn.executemany("UPDATE items SET path = ?, missing = ?, updated_at = ? WHERE row_id = ?;",
+                                      [(self._to_db_path(keeper_path), int(not keeper_exists), now, keeper_row_id)
+                                       for _, keeper_row_id, _, keeper_path, keeper_exists, _ in batch])
+            if on_progress:
+                on_progress("Deduplicating", start + len(batch), len(plan))
 
-                # Prefer keeping an existing file located inside the registry, then any existing file
-                candidates = [keeper_path] + [self._from_db_path(path) for _, path, _ in duplicates]
-                existing = [c for c in candidates if _exists(c)]
-                keeper_path = next((c for c in existing if self.is_inside(c)), existing[0] if existing else keeper_path)
-
-                now = _now()
-                for dup_id, dup_path, dup_size in duplicates:
-                    report["removed"].append((kind, dup_id, keeper_id))
-                    dup_path = self._from_db_path(dup_path)
-                    if dup_path and dup_path != keeper_path and dup_path.exists() and self.is_inside(dup_path):
-                        to_delete.append(dup_path)
-                        report["deleted_files"].append(dup_path.as_posix())
-                        report["freed_bytes"] += dup_size or 0
-                    if dry_run:
-                        continue
-                    keeper_row_id, dup_row_id = self._get_row_id(kind, keeper_id), self._get_row_id(kind, dup_id)
-                    self.conn.execute("UPDATE sources SET item_row_id = ? WHERE item_row_id = ?;",
-                                      (keeper_row_id, dup_row_id))
-                    self.conn.execute("UPDATE items SET canonical_id = ?, updated_at = ? "
-                                      "WHERE kind = ? AND canonical_id = ?;", (keeper_id, now, kind, dup_id))
-                    self.conn.execute("UPDATE items SET canonical_id = ?, path = NULL, updated_at = ? "
-                                      "WHERE kind = ? AND id = ?;", (keeper_id, now, kind, dup_id))
-                if not dry_run:
-                    self.conn.execute("UPDATE items SET path = ?, missing = ?, updated_at = ? "
-                                      "WHERE kind = ? AND id = ?;",
-                                      (self._to_db_path(keeper_path), int(not _exists(keeper_path)), now, kind,
-                                       keeper_id))
-
-        if not dry_run:
-            for path in to_delete:
-                path.unlink(missing_ok=True)
-            self.clear_cache()  # Cached objects of removed duplicates are outdated now
+        for path in to_delete:
+            path.unlink(missing_ok=True)
+        self.clear_cache()  # Cached objects of removed duplicates are outdated now
         return report
 
     # ---------------------------------------------------------------------------------------------
