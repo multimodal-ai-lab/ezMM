@@ -3,13 +3,13 @@ import zipfile
 import pytest
 
 from ezmm import embedding
-from ezmm.embedding import read_text, read_document_text, read_pdf
+from ezmm.embedding import read_document_text, read_pdf, read_text
 
 requires_embed = pytest.mark.skipif(not embedding.is_available(), reason="Requires ezmm[embed]")
 
 
 @pytest.mark.parametrize("data, expected", [
-    ("# Roses\n\nGrüße aus dem Garten.".encode("utf-8"), "# Roses\n\nGrüße aus dem Garten."),
+    ("# Roses\n\nGrüße aus dem Garten.".encode(), "# Roses\n\nGrüße aus dem Garten."),
     ("name,größe\nrose,5".encode("utf-8-sig"), "name,größe\nrose,5"),  # BOM gets removed
     ("name;Größe\nRose;5".encode("latin-1"), "name;Größe\nRose;5"),
     ("Preis: 5 € – günstig".encode("cp1252"), "Preis: 5 € – günstig"),
@@ -32,7 +32,7 @@ def test_read_text_binary(tmp_path):
 
 def test_read_text_truncated_character(tmp_path):
     path = tmp_path / "file.txt"
-    path.write_bytes("ä".encode("utf-8") * 10)
+    path.write_bytes("ä".encode() * 10)
     assert read_text(path, max_bytes=5) == "ää"  # The cut-off third "ä" gets dropped
 
 

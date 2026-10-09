@@ -10,10 +10,10 @@ import subprocess
 import threading
 import zipfile
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
-from typing import Iterable, Iterator, Callable
 
 import cv2
 import imageio_ffmpeg
@@ -137,7 +137,7 @@ def get_model():
         return _model
 
 
-def _encode(inputs: list, prompt_name: str = None, **kwargs) -> np.ndarray:
+def _encode(inputs: list, prompt_name: str | None = None, **kwargs) -> np.ndarray:
     """Embeds the inputs (in the model's input format) into normalized float32 vectors."""
     embeddings = get_model().encode(inputs, prompt_name=prompt_name, normalize_embeddings=True,
                                     convert_to_numpy=True, show_progress_bar=False, **kwargs)
@@ -162,7 +162,7 @@ def cos_sim(a: np.ndarray, b: np.ndarray) -> float:
 # -------------------------------------------------------------------------------------------------
 # Text and images
 
-def embed_text(text: str | list[str], prompt_name: str = DOCUMENT_PROMPT, dim: int = None) -> np.ndarray:
+def embed_text(text: str | list[str], prompt_name: str = DOCUMENT_PROMPT, dim: int | None = None) -> np.ndarray:
     """Embeds the text(s), by default as a document (corpus entry). Use `embed_query()`
     to embed search queries. All embedding functions return embeddings of the configured
     dimension (see `set_embedding_dim()`) unless `dim` is given."""
@@ -171,12 +171,12 @@ def embed_text(text: str | list[str], prompt_name: str = DOCUMENT_PROMPT, dim: i
     return truncate(_encode(list(text), prompt_name), dim or _embedding_dim)
 
 
-def embed_query(query: str, dim: int = None) -> np.ndarray:
+def embed_query(query: str, dim: int | None = None) -> np.ndarray:
     """Embeds a text search query, to be compared with item and document embeddings."""
     return embed_text(query, prompt_name=QUERY_PROMPT, dim=dim)
 
 
-def embed(pillow_images: PillowImage | Iterable[PillowImage], dim: int = None) -> np.ndarray | list[np.ndarray]:
+def embed(pillow_images: PillowImage | Iterable[PillowImage], dim: int | None = None) -> np.ndarray | list[np.ndarray]:
     """Embeds one or multiple Pillow images."""
     if isinstance(pillow_images, PillowImage):
         return truncate(_encode([{"image": pillow_images}])[0], dim or _embedding_dim)
@@ -186,7 +186,7 @@ def embed(pillow_images: PillowImage | Iterable[PillowImage], dim: int = None) -
 # -------------------------------------------------------------------------------------------------
 # Files
 
-def kind_of_file(path: Path | str, mime_type: str = None) -> str:
+def kind_of_file(path: Path | str, mime_type: str | None = None) -> str:
     """Guesses the ezMM item kind (image, video, audio, or file) of the file from its
     extension or, if unknown, from the given MIME type."""
     mime_type = mimetypes.guess_type(Path(path).name)[0] or mime_type or ""
@@ -194,7 +194,7 @@ def kind_of_file(path: Path | str, mime_type: str = None) -> str:
     return kind if kind in ("image", "video", "audio") else "file"
 
 
-def embed_file(path: Path | str, kind: str = None, dim: int = None) -> np.ndarray:
+def embed_file(path: Path | str, kind: str | None = None, dim: int | None = None) -> np.ndarray:
     """Embeds the file at the given path as the given item kind (guessed if not specified)."""
     result = next(embed_files([(path, kind)], dim=dim))
     if isinstance(result, Exception):
@@ -202,7 +202,7 @@ def embed_file(path: Path | str, kind: str = None, dim: int = None) -> np.ndarra
     return result
 
 
-def prepare_input(path: Path | str, kind: str = None) -> str | dict:
+def prepare_input(path: Path | str, kind: str | None = None) -> str | dict:
     """Decodes the file into the model's input format (CPU-bound, thread-safe):
     - images: the image,
     - videos: frames sampled at 1 fps together with the audio track (if any),
@@ -248,7 +248,7 @@ def prepare_input(path: Path | str, kind: str = None) -> str | dict:
 
 
 def embed_files(files: Iterable[tuple[Path | str, str | None]], n_workers: int = N_WORKERS,
-                chunk_size: int = CHUNK_SIZE, dim: int = None) -> Iterator[np.ndarray | Exception]:
+                chunk_size: int = CHUNK_SIZE, dim: int | None = None) -> Iterator[np.ndarray | Exception]:
     """Embeds the files, given as (path, kind) pairs, efficiently: files are decoded by a pool of
     threads while the model embeds the previously decoded chunk of files, in batches of inputs
     of the same modality. Yields one embedding per file, in order, or the exception that
@@ -268,7 +268,7 @@ def embed_files(files: Iterable[tuple[Path | str, str | None]], n_workers: int =
                 yield result if isinstance(result, Exception) else truncate(result, dim or _embedding_dim)
 
 
-def _prepare_or_error(path: Path | str, kind: str = None) -> str | dict | Exception:
+def _prepare_or_error(path: Path | str, kind: str | None = None) -> str | dict | Exception:
     try:
         return prepare_input(path, kind)
     except Exception as e:
@@ -300,8 +300,8 @@ def _encode_batched(inputs: list[str | dict | Exception]) -> list[np.ndarray | E
     return results
 
 
-def embed_registry(kind: str = None, n_workers: int = N_WORKERS, chunk_size: int = CHUNK_SIZE,
-                   on_progress: Callable[[int, int, int], None] = None) -> dict:
+def embed_registry(kind: str | None = None, n_workers: int = N_WORKERS, chunk_size: int = CHUNK_SIZE,
+                   on_progress: Callable[[int, int, int], None] | None = None) -> dict:
     """Embeds all items of the registry (optionally only of the given kind) that are not
     embedded yet, see `embed_files()`. Calls `on_progress(done, total, failed)` after each
     chunk. Returns the number of embedded and failed items."""
@@ -379,7 +379,7 @@ def load_audio(path: Path | str, max_seconds: float = MAX_AUDIO_SECONDS) -> np.n
     at 16 kHz using FFmpeg. Returns None if the file has no audio stream."""
     cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-i", str(path), "-vn",
            "-t", str(max_seconds), "-ac", "1", "-ar", str(AUDIO_SAMPLE_RATE), "-f", "f32le", "-"]
-    result = subprocess.run(cmd, capture_output=True)
+    result = subprocess.run(cmd, capture_output=True, check=False)  # Errors are handled below
     if result.returncode != 0:
         if b"does not contain any stream" in result.stderr or b"matches no streams" in result.stderr:
             return None

@@ -4,15 +4,16 @@ import os
 import sqlite3
 import threading
 import weakref
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional, Callable, Iterable, TypeVar
+from typing import TypeVar
 
 import numpy as np
 
-from ezmm.common.items import Item, KIND2ITEM
+from ezmm.common.items import KIND2ITEM, Item
 from ezmm.common.vector_index import VectorIndex
 from ezmm.util import parse_ref
 
@@ -70,7 +71,7 @@ EMBEDDINGS_SCHEMA = """
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def compute_sha256(path: Path) -> str:
@@ -83,7 +84,7 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 
-def _parallel_map(fn: Callable[[T], R], inputs: Iterable[T], label: str = None) -> list[R]:
+def _parallel_map(fn: Callable[[T], R], inputs: Iterable[T], label: str | None = None) -> list[R]:
     """Applies the (I/O-bound) function to all inputs using a thread pool, preserving the order.
     Hashing releases the GIL, so file reading and hashing run truly in parallel."""
     inputs = list(inputs)
@@ -98,7 +99,7 @@ def _parallel_map(fn: Callable[[T], R], inputs: Iterable[T], label: str = None) 
     return results
 
 
-def _hash_file(path: Optional[Path]) -> Optional[tuple[str, int]]:
+def _hash_file(path: Path | None) -> tuple[str, int] | None:
     """Returns the SHA-256 hash and size of the file, or None if it cannot be read."""
     try:
         return compute_sha256(path), path.stat().st_size
@@ -112,14 +113,14 @@ class _Connection(sqlite3.Connection):
 
 def _access_threshold() -> str:
     """Returns the time before which a source's last access time gets updated on access."""
-    return (datetime.now(timezone.utc) - ACCESS_UPDATE_INTERVAL).isoformat(timespec="seconds")
+    return (datetime.now(UTC) - ACCESS_UPDATE_INTERVAL).isoformat(timespec="seconds")
 
 
 def _decode_vector(blob: bytes, dtype: str) -> np.ndarray:
     return np.frombuffer(blob, dtype=dtype).astype(np.float32)
 
 
-def _exists(path: Optional[Path]) -> bool:
+def _exists(path: Path | None) -> bool:
     return path is not None and path.exists()
 
 
@@ -129,9 +130,8 @@ class ItemRegistry:
     path: Path  # Absolute path to the root directory of the registry
     _db_path: Path  # Path to the SQLite DB file
 
-    cache: dict[tuple[str, int], Item] = dict()
-
-    def __init__(self, path: Path | str = None):
+    def __init__(self, path: Path | str | None = None):
+        self.cache: dict[tuple[str, int], Item] = {}  # Loaded items by (kind, ID)
         # Each thread uses its own DB connection, so reads run in parallel and SQLite
         # serializes the (short) write transactions, also across processes
         self._local = threading.local()
@@ -196,7 +196,7 @@ class ItemRegistry:
             self._open_connection()
             self._init_db()
             self._initialized = True
-            logger.debug(f"Successfully connected to item registry.")
+            logger.debug("Successfully connected to item registry.")
 
     @contextmanager
     def _transaction(self, mode: str = "IMMEDIATE"):
@@ -265,7 +265,7 @@ class ItemRegistry:
     def _backup(self, version: int):
         backup_path = self.path / f"item_registry.v{version}.bak.db"
         if backup_path.exists():
-            backup_path = self.path / f"item_registry.v{version}.bak.{datetime.now():%Y%m%d-%H%M%S}.db"
+            backup_path = self.path / f"item_registry.v{version}.bak.{datetime.now().astimezone():%Y%m%d-%H%M%S}.db"
         backup = sqlite3.connect(backup_path)
         self.conn.backup(backup)
         backup.close()
@@ -343,7 +343,7 @@ class ItemRegistry:
         except ValueError:
             return path.as_posix()
 
-    def _from_db_path(self, path: Optional[str]) -> Optional[Path]:
+    def _from_db_path(self, path: str | None) -> Path | None:
         if path is None:
             return None
         path = Path(path)
@@ -361,7 +361,7 @@ class ItemRegistry:
     # ---------------------------------------------------------------------------------------------
     # Item retrieval
 
-    def get(self, reference: str = None, kind: str = None, identifier: int = None) -> Optional[Item]:
+    def get(self, reference: str | None = None, kind: str | None = None, identifier: int | None = None) -> Item | None:
         """Gets the referenced item object by loading it from the cache or,
         if not in the cache, from the disk. References of removed duplicates
         resolve to the remaining (canonical) item."""
@@ -378,14 +378,14 @@ class ItemRegistry:
 
         return item
 
-    def get_by_path(self, kind: str, path: Path | str) -> Optional[Item]:
+    def get_by_path(self, kind: str, path: Path | str) -> Item | None:
         """Returns the item object located at the path ONLY IF it is
         already registered in the registry."""
         identifier = self._get_id_by_path(kind, path)
         if identifier is not None:
             return self.get(kind=kind, identifier=identifier)
 
-    def get_by_source_url(self, url: str, kind: str = None) -> Optional[Item]:
+    def get_by_source_url(self, url: str, kind: str | None = None) -> Item | None:
         """Returns the item that originates from the given URL, or None if no such
         item exists. Optionally restricted to a kind. Updates the source's last access
         time (at most once per hour, to keep lookups free of writes)."""
@@ -404,7 +404,7 @@ class ItemRegistry:
                     self.conn.execute("UPDATE sources SET last_accessed = ? WHERE url = ?;", (_now(), url))
             return self.get(kind=rows[0][0], identifier=rows[0][1])
 
-    def get_by_sha256(self, kind: str, sha256: str) -> Optional[Item]:
+    def get_by_sha256(self, kind: str, sha256: str) -> Item | None:
         """Returns the item with the given content hash, if any."""
         identifier = self._get_id_by_sha256(kind, sha256)
         if identifier is not None:
@@ -431,17 +431,17 @@ class ItemRegistry:
                              (kind, identifier))
         return [i for (i,) in rows]
 
-    def get_row(self, kind: str, identifier: int) -> Optional[dict]:
+    def get_row(self, kind: str, identifier: int) -> dict | None:
         """Returns the raw registry entry of the item as a dict (without loading the item)."""
         rows = self._execute(f"""
             SELECT {self._COLUMNS} FROM items WHERE kind = ? AND id = ?;
         """, (kind, identifier))
         return self._row_to_dict(rows[0]) if rows else None
 
-    def get_cached(self, reference: str = None,
-                   kind: str = None,
-                   file_path: Path | str = None,
-                   identifier: int = None) -> Optional[Item]:
+    def get_cached(self, reference: str | None = None,
+                   kind: str | None = None,
+                   file_path: Path | str | None = None,
+                   identifier: int | None = None) -> Item | None:
         if reference:
             kind, identifier = parse_ref(reference)
         elif kind is not None and file_path is not None:
@@ -450,18 +450,18 @@ class ItemRegistry:
             assert identifier is not None
         return self._get_cached(kind, identifier)
 
-    def _get_id_by_path(self, kind: str, item_path: Path | str) -> Optional[int]:
+    def _get_id_by_path(self, kind: str, item_path: Path | str) -> int | None:
         rows = self._execute("SELECT id FROM items WHERE kind = ? AND path = ? AND canonical_id IS NULL LIMIT 1;",
                              (kind, self._to_db_path(item_path)))
         return rows[0][0] if rows else None
 
-    def _get_id_by_sha256(self, kind: str, sha256: str) -> Optional[int]:
+    def _get_id_by_sha256(self, kind: str, sha256: str) -> int | None:
         rows = self._execute("""
             SELECT id FROM items WHERE kind = ? AND sha256 = ? AND canonical_id IS NULL ORDER BY id LIMIT 1;
         """, (kind, sha256))
         return rows[0][0] if rows else None
 
-    def _get_item_by_id(self, kind: str, identifier: int) -> Optional[Item]:
+    def _get_item_by_id(self, kind: str, identifier: int) -> Item | None:
         # No lock needed: if threads load the same item concurrently, all get the cached instance
         row = self.get_row(kind, identifier)
         if row is None or kind not in KIND2ITEM:
@@ -487,7 +487,7 @@ class ItemRegistry:
     # ---------------------------------------------------------------------------------------------
     # Item insertion and updates
 
-    def add_item(self, item: Item) -> Optional[int]:
+    def add_item(self, item: Item) -> int | None:
         """Adds an item (without an ID) to the registry, if not yet registered.
         If an identical file (same kind and content) is registered already, the
         item collapses to the existing registry entry: it adopts the existing ID
@@ -532,13 +532,13 @@ class ItemRegistry:
         self._add_to_cache(item, identifier)
         return identifier
 
-    def _find_duplicate(self, kind: str, sha256: str) -> Optional[tuple[int, Optional[Path]]]:
+    def _find_duplicate(self, kind: str, sha256: str) -> tuple[int, Path | None] | None:
         """Returns the ID and file path of the registered item with the given hash, if any."""
         identifier = self._get_id_by_sha256(kind, sha256)
         if identifier is not None:
             return identifier, self._from_db_path(self.get_row(kind, identifier)["path"])
 
-    def _adopt_duplicate(self, item: Item, identifier: int, existing_path: Optional[Path]) -> Optional[Path]:
+    def _adopt_duplicate(self, item: Item, identifier: int, existing_path: Path | None) -> Path | None:
         """Lets the (new) item point to the file of the existing, identical item. Must be called
         within a transaction. Returns the item's (temporary) file if it is obsolete now."""
         if existing_path is not None and existing_path.exists():
@@ -552,7 +552,7 @@ class ItemRegistry:
         self.conn.execute("UPDATE items SET path = ?, missing = 0, updated_at = ? WHERE kind = ? AND id = ?;",
                           (self._to_db_path(item.file_path), _now(), item.kind, identifier))
 
-    def add_source_url(self, kind: str, identifier: int, url: Optional[str]):
+    def add_source_url(self, kind: str, identifier: int, url: str | None):
         """Records the URL as a source of the item (if not recorded yet) and updates
         the source's last access time (at most once per hour)."""
         if not url:
@@ -569,7 +569,7 @@ class ItemRegistry:
             if row_id is not None and self._link_source(row_id, url):
                 self.conn.execute("UPDATE items SET updated_at = ? WHERE row_id = ?;", (_now(), row_id))
 
-    def _link_source(self, item_row_id: int, url: Optional[str]) -> bool:
+    def _link_source(self, item_row_id: int, url: str | None) -> bool:
         """Inserts the source URL (if new), marks it as accessed, and lets it point to the
         item. If the URL pointed to another item before (i.e., the content behind the URL
         changed), it now points to the given item. Returns True iff the source is new for
@@ -585,7 +585,7 @@ class ItemRegistry:
         """, (url, item_row_id, now, now))
         return previous is None or previous[0] != item_row_id
 
-    def _get_row_id(self, kind: str, identifier: int) -> Optional[int]:
+    def _get_row_id(self, kind: str, identifier: int) -> int | None:
         row = self.conn.execute("SELECT row_id FROM items WHERE kind = ? AND id = ?;", (kind, identifier)).fetchone()
         return row[0] if row else None
 
@@ -690,7 +690,7 @@ class ItemRegistry:
     # ---------------------------------------------------------------------------------------------
     # Embeddings
 
-    def get_embedding(self, kind: str, identifier: int, model: str) -> Optional[np.ndarray]:
+    def get_embedding(self, kind: str, identifier: int, model: str) -> np.ndarray | None:
         """Returns the stored (full) embedding of the item computed by the given model, if any."""
         rows = self._execute("""
             SELECT e.vector, e.dtype FROM embeddings e JOIN items i ON i.row_id = e.item_row_id
@@ -722,7 +722,7 @@ class ItemRegistry:
                 index.add([(kind, identifier) for kind, identifier, _ in embeddings],
                           np.stack([vector for _, _, vector in embeddings]))
 
-    def list_unembedded(self, model: str, kind: str = None, limit: int = None) -> list[tuple[str, int]]:
+    def list_unembedded(self, model: str, kind: str | None = None, limit: int | None = None) -> list[tuple[str, int]]:
         """Returns (kind, id) of all items (without aliases and missing files) that have
         no embedding computed by the given model yet."""
         where, params = self._filter(kind, None, include_missing=False)
@@ -746,7 +746,7 @@ class ItemRegistry:
             WHERE e.model = ? AND i.canonical_id IS NULL;
         """, (model,))[0][0]
 
-    def get_embedding_index(self, model: str, dim: int, device: str = None) -> VectorIndex:
+    def get_embedding_index(self, model: str, dim: int, device: str | None = None) -> VectorIndex:
         """Returns the in-memory index of all stored embeddings of the given model (without
         aliases), truncated to `dim` dimensions and located on the given device ('cpu' for
         RAM, 'cuda' for GPU memory; default: see `ezmm.embedding.get_index_device()`).
@@ -786,8 +786,8 @@ class ItemRegistry:
 
             index.load(n, batches())
 
-    def search(self, vector: np.ndarray, model: str, kind: str = None, limit: int = 48,
-               include_missing: bool = False, exclude: tuple[str, int] = None, device: str = None) -> list[dict]:
+    def search(self, vector: np.ndarray, model: str, kind: str | None = None, limit: int = 48,
+               include_missing: bool = False, exclude: tuple[str, int] | None = None, device: str | None = None) -> list[dict]:
         """Returns the registry entries (as dicts with an additional `score`) whose embeddings
         are most similar (cosine similarity) to the given vector, most similar first. Only
         items with an embedding by the given model are considered. Embeddings are compared
@@ -826,7 +826,7 @@ class ItemRegistry:
     # ---------------------------------------------------------------------------------------------
     # Browsing
 
-    def list_items(self, kind: str = None, query: str = None,
+    def list_items(self, kind: str | None = None, query: str | None = None,
                    offset: int = 0, limit: int = 50, include_missing: bool = True) -> list[dict]:
         """Returns the registry entries (newest first, without aliases) as dicts,
         optionally filtered by kind and a search query (matching source URLs and paths).
@@ -838,7 +838,7 @@ class ItemRegistry:
         """, params + (limit, offset))
         return [self._row_to_dict(row) for row in rows]
 
-    def count_items(self, kind: str = None, query: str = None, include_missing: bool = True) -> int:
+    def count_items(self, kind: str | None = None, query: str | None = None, include_missing: bool = True) -> int:
         where, params = self._filter(kind, query, include_missing)
         return self._execute(f"SELECT COUNT(*) FROM items WHERE {where};", params)[0][0]
 
@@ -851,7 +851,7 @@ class ItemRegistry:
         return {kind: dict(count=count, size=size) for kind, count, size in rows}
 
     @staticmethod
-    def _filter(kind: Optional[str], query: Optional[str], include_missing: bool = True) -> tuple[str, tuple]:
+    def _filter(kind: str | None, query: str | None, include_missing: bool = True) -> tuple[str, tuple]:
         where, params = ["canonical_id IS NULL"], []
         if not include_missing:
             where.append("missing = 0")
@@ -876,7 +876,7 @@ class ItemRegistry:
     # ---------------------------------------------------------------------------------------------
     # Cache and connection
 
-    def _get_cached(self, kind: str, identifier: int) -> Optional[Item]:
+    def _get_cached(self, kind: str, identifier: int) -> Item | None:
         """Tries to retrieve the specified item from the cache. Returns
         None if it is not in the cache."""
         return self.cache.get((kind, identifier))

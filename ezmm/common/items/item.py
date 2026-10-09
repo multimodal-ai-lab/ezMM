@@ -2,10 +2,11 @@ import logging
 import mimetypes
 import re
 from abc import ABC
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from shutil import copyfile, move
-from typing import Sequence, Optional
+from typing import Optional
 from uuid import uuid4
 
 import numpy as np
@@ -27,8 +28,8 @@ class Item(ABC):
     _sha256: str = None  # Cached SHA-256 hash of the item's file
     _embedding: np.ndarray = None  # Cached (full) embedding of the item file
 
-    def __new__(cls, file_path: Path | str = None, source_url: str = None, reference: str = None,
-                id: int = None, **kwargs):
+    def __new__(cls, file_path: Path | str | None = None, source_url: str | None = None, reference: str | None = None,
+                id: int | None = None, **kwargs):
         """Checks if there already exists an instance of the item with the given reference.
         If yes, returns the existing reference. Otherwise, instantiates a new one."""
         from ezmm.common.registry import item_registry
@@ -54,7 +55,7 @@ class Item(ABC):
 
         return super().__new__(cls)
 
-    def __init__(self, file_path: Path | str, source_url: str = None, reference: str = None, id: int = None):
+    def __init__(self, file_path: Path | str, source_url: str | None = None, reference: str | None = None, id: int | None = None):
         if hasattr(self, "id"):
             # This item is already instantiated, no init needed
             return
@@ -73,7 +74,6 @@ class Item(ABC):
 
     def _validate_new_file(self):
         """Hook to check a new file before it gets registered. Raises an error if invalid."""
-        pass
 
     @property
     def reference(self) -> str:
@@ -120,7 +120,7 @@ class Item(ABC):
             if self.file_path.exists():
                 from ezmm.common.registry import item_registry
                 item_registry.update_file_path(self)
-                logger.info(f"File path successfully healed.")
+                logger.info("File path successfully healed.")
             else:
                 raise FileNotFoundError(f"File of item '{self.reference}' does not exist anymore.")
 
@@ -188,7 +188,7 @@ class Item(ABC):
 
     def _compute_embedding(self) -> np.ndarray:
         """Computes the full embedding of the item's file."""
-        from ezmm.embedding import embed_file, MODEL_DIM
+        from ezmm.embedding import MODEL_DIM, embed_file
         return embed_file(self.file_path, self.kind, dim=MODEL_DIM)
 
     def cos_sim(self, other: "Item | np.ndarray") -> float:
@@ -209,7 +209,7 @@ class Item(ABC):
         Use it when the item's ID is not set yet."""
         from ezmm.common.registry import item_registry
         # Unique also for items created by parallel threads or processes at the same time
-        filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f") + f"_{uuid4().hex[:8]}" + suffix
+        filename = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S-%f") + f"_{uuid4().hex[:8]}" + suffix
         return (item_registry.path / "items" / filename).absolute()
 
     def _default_file_path(self) -> Path:
@@ -249,8 +249,8 @@ def resolve_references_from_string(string: str) -> list[str | Item]:
     """Identifies all item references within the string and replaces them with
     an instance of the referenced item. Returns the (interleaved) list of
     strings and items."""
-    from ezmm.common.registry import item_registry
     from ezmm.common.items import ITEM_REF_REGEX
+    from ezmm.common.registry import item_registry
     ref_regex = rf"\s?{ITEM_REF_REGEX}\s?"  # Extend to optional whitespaces before and after the ref
     split = re.split(ref_regex, string)
     # Replace each reference with its actual item object

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ezmm import File, FileTooLargeError, MultimodalSequence, set_max_file_size, get_max_file_size
+from ezmm import File, FileTooLargeError, MultimodalSequence, get_max_file_size, set_max_file_size
 from ezmm.common import item_registry
 
 

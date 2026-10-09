@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
 
 import imageio_ffmpeg as ffmpeg
 from PIL.Image import Image as PillowImage
@@ -25,7 +24,7 @@ def parse_ref(ref: str) -> tuple[str, int]:
     return result
 
 
-def parse_item_ref(reference: str) -> Optional[tuple[str, int]]:
+def parse_item_ref(reference: str) -> tuple[str, int] | None:
     """Returns the first matching kind and identifier from the reference."""
     from ezmm.common.items import ITEM_KIND_ID_REGEX
     pattern = re.compile(ITEM_KIND_ID_REGEX, re.DOTALL)
@@ -79,7 +78,7 @@ def ts_to_mp4(ts_bytes: bytes) -> bytes:
             "-f", "mp4",
             str(temp_mp4_path)
         ]
-        result = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        result = subprocess.run(cmd, capture_output=True, check=False)  # Errors are handled below
 
         if result.returncode != 0:
             raise RuntimeError(f"FFmpeg error:\n{result.stderr.decode(errors='ignore')}")

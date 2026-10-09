@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ezmm import Audio, MultimodalSequence, Item
+from ezmm import Audio, Item, MultimodalSequence
 
 
 def test_audio():

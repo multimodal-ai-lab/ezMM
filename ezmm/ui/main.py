@@ -5,22 +5,21 @@ import math
 import socket
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
-from urllib.parse import urlparse, urlencode
+from urllib.parse import urlencode, urlparse
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, Form
+from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
 from ezmm import MultimodalSequence
 from ezmm.common import item_registry
-from ezmm.common.items import KINDS, KIND2ITEM
+from ezmm.common.items import KIND2ITEM, KINDS
 from ezmm.common.items.file import format_size
 from ezmm.ui.common import get_seq_path
 from ezmm.util import parse_ref
@@ -38,13 +37,13 @@ app.mount("/static", StaticFiles(directory=UI_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=UI_DIR / "templates")
 
 
-def _time_ago(timestamp: Optional[str]) -> str:
+def _time_ago(timestamp: str | None) -> str:
     if not timestamp:
         return ""
     then = datetime.fromisoformat(timestamp)
     if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    seconds = (datetime.now(timezone.utc) - then).total_seconds()
+        then = then.replace(tzinfo=UTC)
+    seconds = (datetime.now(UTC) - then).total_seconds()
     for unit, length in (("y", 31536000), ("mo", 2592000), ("d", 86400), ("h", 3600), ("min", 60)):
         if seconds >= length:
             return f"{int(seconds // length)} {unit} ago"
@@ -58,7 +57,7 @@ def _host(url: str) -> str:
 
 def _duration(seconds: float) -> str:
     """Formats the duration as m:ss, or h:mm:ss for durations of an hour or more."""
-    seconds = max(int(round(seconds or 0)), 0)
+    seconds = max(round(seconds or 0), 0)
     hours, minutes = seconds // 3600, seconds // 60 % 60
     return f"{hours}:{minutes:02d}:{seconds % 60:02d}" if hours else f"{minutes}:{seconds % 60:02d}"
 
@@ -202,7 +201,7 @@ class _Indexer:
     """Embeds all not yet embedded items of the registry in a background thread."""
 
     def __init__(self):
-        self.thread: Optional[threading.Thread] = None
+        self.thread: threading.Thread | None = None
         self.done = self.total = self.failed = 0
 
     @property
@@ -230,8 +229,8 @@ indexer = _Indexer()
 
 
 def _render_search(request: Request, kind: str = "", q: str = "", like: str = "",
-                   query_vector=None, query_label: str = "", error: str = None):
-    from ezmm.embedding import MODEL_NAME, embed_query, is_available, INSTALL_HINT
+                   query_vector=None, query_label: str = "", error: str | None = None):
+    from ezmm.embedding import INSTALL_HINT, MODEL_NAME, embed_query, is_available
     kind = kind if kind in KINDS else ""
     results, exclude = [], None
     if not is_available():
@@ -283,7 +282,7 @@ async def search(request: Request, q: str = "", kind: str = "", like: str = ""):
 async def search_by_file(request: Request, file: UploadFile, kind: str = Form("")):
     """Semantic search over all items with an uploaded file of any kind as the query.
     The file is embedded on the fly and not added to the registry."""
-    from ezmm.embedding import embed_file, kind_of_file, is_available
+    from ezmm.embedding import embed_file, is_available, kind_of_file
     data = await file.read()
     if not is_available():
         return _render_search(request, kind=kind)
@@ -340,7 +339,7 @@ def is_port_in_use(port: int, host: str = DEFAULT_HOST) -> bool:
         try:
             s.bind((host, port))
             return False
-        except socket.error:
+        except OSError:
             return True
 
 

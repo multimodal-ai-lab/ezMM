@@ -17,6 +17,7 @@ def run_before_each_test(tmp_path):
 def audio_only_video(tmp_path):
     """An MP4 file without video stream (e.g., from downloading an audio-only HLS variant)."""
     import subprocess
+
     import imageio_ffmpeg
     path = tmp_path / "audio_only.mp4"
     subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-i", "in/tone.wav", "-c:a", "aac", str(path)],

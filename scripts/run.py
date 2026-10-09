@@ -1,7 +1,7 @@
 """Example script showcasing the usage of ezmm."""
 
 if __name__ == "__main__":
-    from ezmm import MultimodalSequence, Image
+    from ezmm import Image, MultimodalSequence
 
     img1 = Image("in/roses.jpg")
     img2 = Image("in/garden.jpg")

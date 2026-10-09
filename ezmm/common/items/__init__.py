@@ -1,8 +1,8 @@
-from ezmm.common.items.item import Item, REF
-from ezmm.common.items.image import Image
-from ezmm.common.items.video import Video
 from ezmm.common.items.audio import Audio
-from ezmm.common.items.file import File, FileTooLargeError, set_max_file_size, get_max_file_size
+from ezmm.common.items.file import File, FileTooLargeError, get_max_file_size, set_max_file_size
+from ezmm.common.items.image import Image
+from ezmm.common.items.item import REF, Item
+from ezmm.common.items.video import Video
 
 ITEM_CLASSES = [Image, Video, Audio, File]
 KIND2ITEM = {item.kind: item for item in ITEM_CLASSES}

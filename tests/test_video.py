@@ -3,8 +3,7 @@ from shutil import copyfile
 import numpy as np
 import pytest
 
-from ezmm import embedding
-from ezmm import MultimodalSequence, Video
+from ezmm import MultimodalSequence, Video, embedding
 
 
 def test_video():

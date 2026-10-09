@@ -14,11 +14,11 @@ logger = logging.getLogger("ezMM")
 class Video(Item):
     kind = "video"
 
-    def __init__(self, file_path: str | Path = None,
-                 binary_data: bytes = None,
-                 source_url: str = None,
-                 reference: str = None,
-                 id: int = None):
+    def __init__(self, file_path: str | Path | None = None,
+                 binary_data: bytes | None = None,
+                 source_url: str | None = None,
+                 reference: str | None = None,
+                 id: int | None = None):
         assert file_path or binary_data or reference or id is not None
 
         if binary_data:
@@ -33,11 +33,7 @@ class Video(Item):
     def _open_cap(self) -> cv2.VideoCapture:
         cap = cv2.VideoCapture(str(self.file_path))
         if not cap.isOpened():
-            # Ensure resources are cleaned even on failure
-            try:
-                cap.release()
-            except Exception:
-                pass
+            cap.release()  # Ensure resources are cleaned even on failure
             raise OSError(f"Failed to open video: {self.file_path}")
         return cap
 
