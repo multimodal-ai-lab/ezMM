@@ -4,6 +4,7 @@ import os
 from typing import Sequence, Iterable
 from collections.abc import Sequence as SequenceABC
 
+import numpy as np
 from markdown import markdown
 
 from ezmm.common.items import Image, Audio, Video, File
@@ -128,6 +129,25 @@ class MultimodalSequence:
             else:
                 htmls.append(markdown(item))
         return " ".join(htmls)
+
+    @property
+    def embedding(self) -> np.ndarray:
+        """Returns the (normalized) embedding of the sequence: the average of the embedding
+        of the sequence's full text and the embeddings of its (unique) items."""
+        from ezmm.embedding import embed_text, normalize
+        items = list(dict.fromkeys(el for el in self.data if isinstance(el, Item)))
+        embeddings = [item.embedding for item in items]
+        if self.text.strip():
+            embeddings.append(embed_text(self.text))
+        if not embeddings:
+            raise ValueError("Cannot embed an empty MultimodalSequence.")
+        return normalize(np.mean(embeddings, axis=0))
+
+    def cos_sim(self, other: Item | MultimodalSequence | np.ndarray) -> float:
+        """Computes the cosine similarity between this sequence and another
+        sequence, item, or embedding vector."""
+        from ezmm.embedding import cos_sim
+        return cos_sim(self.embedding, getattr(other, "embedding", other))
 
     def unique_items(self) -> set[Item]:
         """Returns the set of all items (not strings) occurring in the sequence."""

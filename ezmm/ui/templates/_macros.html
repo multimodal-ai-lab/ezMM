@@ -15,3 +15,35 @@
     <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>
 </button>
 {%- endmacro %}
+
+{% macro item_card(e) -%}
+<a class="card kind-{{ e.kind }}" href="/item/{{ e.kind }}/{{ e.id }}">
+    <div class="thumb">
+        {% if e.missing %}
+        <div class="placeholder missing">
+            <span class="placeholder-icon">{{ kind_icon(e.kind) }}</span>
+            <span class="placeholder-ext">FILE MISSING</span>
+        </div>
+        {% elif e.kind == 'image' %}
+        <img src="/item/{{ e.kind }}/{{ e.id }}/file" alt="{{ e.reference }}" loading="lazy" decoding="async">
+        {% elif e.kind == 'video' %}
+        <video src="/item/{{ e.kind }}/{{ e.id }}/file#t=0.5" muted loop playsinline preload="metadata"></video>
+        <span class="play-badge" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
+        {% else %}
+        <div class="placeholder">
+            <span class="placeholder-icon">{{ kind_icon(e.kind) }}</span>
+            <span class="placeholder-ext">{{ e.suffix or e.kind | upper }}</span>
+        </div>
+        {% endif %}
+        <span class="chip ref">{{ e.reference }}</span>
+        {% if e.score is defined %}<span class="chip score" title="Cosine similarity">{{ '%.2f' | format(e.score) }}</span>{% endif %}
+    </div>
+    <div class="card-body">
+        <span class="card-title" title="{{ e.source_url or '' }}">{{ e.source_url | host if e.source_url else 'unknown source' }}</span>
+        <span class="card-meta">
+            <span class="kind-dot"></span>{{ e.kind }}{% if e.size is not none %} · {{ e.size | size }}{% endif %}
+            <span class="spacer"></span>{{ e.created_at | time_ago }}
+        </span>
+    </div>
+</a>
+{%- endmacro %}

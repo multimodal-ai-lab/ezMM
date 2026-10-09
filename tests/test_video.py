@@ -3,6 +3,7 @@ from shutil import copyfile
 import numpy as np
 import pytest
 
+from ezmm import embedding
 from ezmm import MultimodalSequence, Video
 
 
@@ -70,9 +71,10 @@ def test_metadata(path: str):
     assert_metadata()
 
 
+@pytest.mark.skipif(not embedding.is_available(), reason="Requires ezmm[embed]")
 def test_embedding():
     vid1 = Video("in/mountains.mp4")
     vid2 = Video("in/snow.mp4")
-    print(vid1.embedding)
-    print(vid2.embedding)
-    print(vid1.cos_sim(vid2))
+    assert vid1.embedding.shape == vid2.embedding.shape == (embedding.get_embedding_dim(),)
+    assert 0 < vid1.cos_sim(vid2) < 0.99
+    assert vid1.cos_sim(vid1) > 0.999

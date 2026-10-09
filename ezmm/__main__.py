@@ -3,6 +3,7 @@
     python -m ezmm dedup [--path PATH] [--dry-run]                # Remove duplicate files from the registry
     python -m ezmm migrate [--path PATH]                          # Migrate a legacy registry DB
     python -m ezmm check [--path PATH]                            # Check which items' files are missing
+    python -m ezmm embed [--path PATH] [--kind KIND]              # Embed all items (for semantic search)
 """
 import argparse
 import os
@@ -27,8 +28,12 @@ def main(argv: list[str] = None):
     check = commands.add_parser("check", help="Check for all items whether their file exists "
                                               "and update the registry's 'missing' flags.")
 
+    embed = commands.add_parser("embed", help="Compute the embeddings of all items that are not embedded yet "
+                                              "(makes them searchable in the web UI).")
+    embed.add_argument("--kind", help="Only embed items of this kind (image, video, audio, or file).")
+
     # Allow `--path` after the sub-command, too
-    for sub in (ui, dedup, migrate, check):
+    for sub in (ui, dedup, migrate, check, embed):
         sub.add_argument("--path", dest="sub_path", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     path = getattr(args, "sub_path", None) or args.path
@@ -63,6 +68,26 @@ def main(argv: list[str] = None):
         result = item_registry.check_files()
         print(f"Checked {result['checked']} items: {result['missing']} files missing "
               f"({result['changed']} flags updated).")
+
+    elif args.command == "embed":
+        from time import time
+        from ezmm.embedding import MODEL_NAME, embed_registry, is_available, INSTALL_HINT
+        if not is_available():
+            parser.exit(1, INSTALL_HINT + "
+")
+        print(f"Embedding {item_registry.count_unembedded(MODEL_NAME)} items with {MODEL_NAME}...")
+        start, last_print = time(), 0
+
+        def on_progress(done: int, total: int, failed: int):
+            nonlocal last_print
+            if time() - last_print > 10 or done == total:
+                rate = done / (time() - start)
+                print(f"  {done}/{total} items processed ({failed} failed, {rate:.1f} items/s, "
+                      f"~{(total - done) / rate / 60:.0f} min left)")
+                last_print = time()
+
+        result = embed_registry(kind=args.kind, on_progress=on_progress)
+        print(f"Embedded {result['embedded']} items ({result['failed']} failed).")
 
 
 if __name__ == "__main__":

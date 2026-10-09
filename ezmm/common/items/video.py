@@ -1,7 +1,6 @@
 import base64
 import logging
 from pathlib import Path
-from PIL.Image import fromarray
 
 import cv2
 import numpy as np
@@ -122,13 +121,3 @@ class Video(Item):
     def as_html(self) -> str:
         return f'<video controls preload="metadata" src="{self.file_url}"></video>'
 
-    def _compute_embedding(self) -> np.ndarray:
-        """Returns the average embedding of 5 equal-distance video frames."""
-        from ezmm.embedding import embed
-        frames = self.sample_frames(5, format='rgb')
-        if frames:
-            pillow_images = [fromarray(frame) for frame in frames]
-            embeddings = embed(pillow_images)
-            return np.mean(embeddings, axis=0)
-        else:
-            raise ValueError("Cannot compute embedding without video frames.")

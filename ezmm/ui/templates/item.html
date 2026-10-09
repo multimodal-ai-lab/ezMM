@@ -42,6 +42,11 @@
             <h1 class="mono">{{ entry.reference }}</h1>
             {{ copy_button(entry.reference, "Copy reference") }}
         </div>
+        {% if file_exists and embeddings_available() %}
+        <div class="panel-actions">
+            <a class="btn" href="{{ search_url(like=entry.kind ~ ':' ~ entry.id) }}">Find similar items</a>
+        </div>
+        {% endif %}
         {% if error %}<p class="alert">{{ error }}</p>{% endif %}
 
         <dl class="props">

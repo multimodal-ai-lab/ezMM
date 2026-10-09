@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable, Iterable, TypeVar
 
+import numpy as np
+
 from ezmm.common.items import Item, KIND2ITEM
+from ezmm.common.vector_index import VectorIndex
 from ezmm.util import parse_ref
 
 logger = logging.getLogger("ezMM")
@@ -46,6 +49,19 @@ SCHEMA = """
         last_accessed TEXT NOT NULL  -- Last time an item was loaded from or looked up via this URL
     );
     CREATE INDEX IF NOT EXISTS sources_item_idx ON sources(item_row_id);
+"""
+
+# Embedding vectors (normalized float32) of items, one per item and embedding model. An optional
+# addition to schema v3 (created on connect), so registries remain readable by older ezMM versions.
+EMBEDDINGS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS embeddings (
+        item_row_id INTEGER NOT NULL REFERENCES items(row_id),
+        model TEXT NOT NULL,
+        vector BLOB NOT NULL,
+        dtype TEXT NOT NULL DEFAULT 'float32',  -- Data type of the vector's values
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (item_row_id, model)
+    );
 """
 
 
@@ -86,6 +102,10 @@ def _hash_file(path: Optional[Path]) -> Optional[tuple[str, int]]:
         return None
 
 
+def _decode_vector(blob: bytes, dtype: str) -> np.ndarray:
+    return np.frombuffer(blob, dtype=dtype).astype(np.float32)
+
+
 def _exists(path: Optional[Path]) -> bool:
     return path is not None and path.exists()
 
@@ -102,6 +122,7 @@ class ItemRegistry:
 
     def __init__(self, path: Path | str = None):
         self._lock = threading.RLock()
+        self._embedding_index: dict[tuple[str, int, str], VectorIndex] = dict()  # (model, dim, device) -> index
         if path is None:
             path = os.getenv("EZMM")
             if path:
@@ -118,6 +139,7 @@ class ItemRegistry:
                 raise RuntimeError("Cannot change path for an established ezMM Item Registry.")
             self.path = path.absolute()
             self._db_path = self.path / "item_registry.db"
+            self._embedding_index.clear()
 
     def _ensure_connected(self):
         if self.conn is None:
@@ -165,6 +187,10 @@ class ItemRegistry:
                                    f"but this ezMM version supports only up to {SCHEMA_VERSION}. Please upgrade ezMM.")
             if version < SCHEMA_VERSION:
                 self.migrate()
+            self.conn.execute(EMBEDDINGS_SCHEMA)
+            columns = [row[1] for row in self.conn.execute("PRAGMA table_info(embeddings);").fetchall()]
+            if "dtype" not in columns:  # Added in ezMM 0.7.0 during development
+                self.conn.execute("ALTER TABLE embeddings ADD COLUMN dtype TEXT NOT NULL DEFAULT 'float32';")
 
     def _create_schema(self):
         """Creates all tables and indices (if not existing) and sets the schema version."""
@@ -177,7 +203,7 @@ class ItemRegistry:
         """Returns the names of the per-kind tables of the legacy (v1) schema."""
         rows = self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table';").fetchall()
         return [name for (name,) in rows
-                if name not in ("items", "sources") and not name.startswith("sqlite_")]
+                if name not in ("items", "sources", "embeddings") and not name.startswith("sqlite_")]
 
     def migrate(self):
         """Migrates the DB to the current schema (creates the schema for a new DB). Item IDs
@@ -596,6 +622,132 @@ class ItemRegistry:
         return report
 
     # ---------------------------------------------------------------------------------------------
+    # Embeddings
+
+    def get_embedding(self, kind: str, identifier: int, model: str) -> Optional[np.ndarray]:
+        """Returns the stored (full) embedding of the item computed by the given model, if any."""
+        rows = self._execute("""
+            SELECT e.vector, e.dtype FROM embeddings e JOIN items i ON i.row_id = e.item_row_id
+            WHERE i.kind = ? AND i.id = ? AND e.model = ?;
+        """, (kind, identifier, model))
+        return _decode_vector(*rows[0]) if rows else None
+
+    def set_embedding(self, kind: str, identifier: int, model: str, vector: np.ndarray):
+        """Stores the embedding of the item computed by the given model."""
+        self.set_embeddings(model, [(kind, identifier, vector)])
+
+    def set_embeddings(self, model: str, embeddings: Iterable[tuple[str, int, np.ndarray]]):
+        """Stores the embeddings (kind, id, vector) of multiple items, computed by the given
+        model, in one transaction. Vectors are stored as float16."""
+        embeddings = list(embeddings)
+        now = _now()
+        with self._transaction():
+            rows = [(row_id, model, np.asarray(vector, dtype=np.float16).tobytes(), "float16", now)
+                    for kind, identifier, vector in embeddings
+                    if (row_id := self._get_row_id(kind, identifier)) is not None]
+            self.conn.executemany("""
+                INSERT INTO embeddings(item_row_id, model, vector, dtype, created_at) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(item_row_id, model) DO UPDATE SET vector = excluded.vector, dtype = excluded.dtype,
+                                                              created_at = excluded.created_at;
+            """, rows)
+        # Add the new embeddings to the already loaded indices
+        for (index_model, _, _), index in self._embedding_index.items():
+            if index_model == model and embeddings:
+                index.add([(kind, identifier) for kind, identifier, _ in embeddings],
+                          np.stack([vector for _, _, vector in embeddings]))
+
+    def list_unembedded(self, model: str, kind: str = None, limit: int = None) -> list[tuple[str, int]]:
+        """Returns (kind, id) of all items (without aliases and missing files) that have
+        no embedding computed by the given model yet."""
+        where, params = self._filter(kind, None, include_missing=False)
+        rows = self._execute(f"""
+            SELECT kind, id FROM items WHERE {where} AND NOT EXISTS (
+                SELECT 1 FROM embeddings e WHERE e.item_row_id = items.row_id AND e.model = ?)
+            ORDER BY created_at DESC, id DESC LIMIT ?;
+        """, params + (model, -1 if limit is None else limit))
+        return [(k, i) for k, i in rows]
+
+    def count_unembedded(self, model: str) -> int:
+        where, params = self._filter(None, None, include_missing=False)
+        return self._execute(f"""
+            SELECT COUNT(*) FROM items WHERE {where} AND NOT EXISTS (
+                SELECT 1 FROM embeddings e WHERE e.item_row_id = items.row_id AND e.model = ?);
+        """, params + (model,))[0][0]
+
+    def count_embedded(self, model: str) -> int:
+        return self._execute("""
+            SELECT COUNT(*) FROM embeddings e JOIN items i ON i.row_id = e.item_row_id
+            WHERE e.model = ? AND i.canonical_id IS NULL;
+        """, (model,))[0][0]
+
+    def get_embedding_index(self, model: str, dim: int, device: str = None) -> VectorIndex:
+        """Returns the in-memory index of all stored embeddings of the given model (without
+        aliases), truncated to `dim` dimensions and located on the given device ('cpu' for
+        RAM, 'cuda' for GPU memory; default: see `ezmm.embedding.get_index_device()`).
+        Built on first use, then kept up to date as embeddings get added."""
+        if device is None:
+            from ezmm.embedding import get_index_device
+            device = get_index_device()
+        key = (model, dim, device)
+        with self._lock:
+            index = self._embedding_index.get(key)
+            if index is None:
+                index = self._embedding_index[key] = self._build_index(model, dim, device)
+            return index
+
+    def _build_index(self, model: str, dim: int, device: str) -> VectorIndex:
+        logger.info(f"Loading embeddings into the search index ({device}, {dim} dimensions)...")
+        n = self.count_embedded(model)
+        cursor = self.conn.execute("""
+            SELECT i.kind, i.id, e.vector, e.dtype FROM embeddings e JOIN items i ON i.row_id = e.item_row_id
+            WHERE e.model = ? AND i.canonical_id IS NULL ORDER BY i.row_id;
+        """, (model,))
+
+        def batches():
+            while rows := cursor.fetchmany(65536):
+                yield ([(kind, identifier) for kind, identifier, _, _ in rows],
+                       np.stack([_decode_vector(vector, dtype)[:dim] for _, _, vector, dtype in rows]))
+
+        return VectorIndex.build(dim, device, n, batches())
+
+    def search(self, vector: np.ndarray, model: str, kind: str = None, limit: int = 48,
+               include_missing: bool = False, exclude: tuple[str, int] = None, device: str = None) -> list[dict]:
+        """Returns the registry entries (as dicts with an additional `score`) whose embeddings
+        are most similar (cosine similarity) to the given vector, most similar first. Only
+        items with an embedding by the given model are considered. Embeddings are compared
+        in the dimension of the given vector (Matryoshka truncation)."""
+        index = self.get_embedding_index(model, dim=len(vector), device=device)
+        if len(index) == 0:
+            return []
+        scores = index.scores(vector)
+        results = []
+        for i in self._ranking(scores, n_candidates=limit * 4 if kind is None else limit * 40):
+            item_kind, identifier = index.keys[i]
+            if kind and item_kind != kind or (item_kind, identifier) == exclude:
+                continue
+            row = self.get_row(item_kind, identifier)
+            if row is None or row["canonical_id"] is not None or row["missing"] and not include_missing:
+                continue
+            row["score"] = float(scores[i])
+            results.append(row)
+            if len(results) >= limit:
+                break
+        return results
+
+    @staticmethod
+    def _ranking(scores: np.ndarray, n_candidates: int) -> Iterable[int]:
+        """Yields the indices of the scores in descending order. Sorts only the top candidates
+        first (fast for large registries) and falls back to sorting the rest if more are needed."""
+        if len(scores) <= n_candidates:
+            yield from np.argsort(-scores)
+            return
+        top = np.argpartition(-scores, n_candidates)[:n_candidates]
+        top = top[np.argsort(-scores[top])]
+        yield from top
+        rest = np.setdiff1d(np.arange(len(scores)), top, assume_unique=True)
+        yield from rest[np.argsort(-scores[rest])]
+
+    # ---------------------------------------------------------------------------------------------
     # Browsing
 
     def list_items(self, kind: str = None, query: str = None,
@@ -676,6 +828,7 @@ class ItemRegistry:
         """Resets the cache to free resources. Call this function if you experience
         out-of-memory issues. This will not affect the persistent data (media files and DB)."""
         self.cache.clear()
+        self._embedding_index.clear()
 
 
 item_registry = ItemRegistry()
