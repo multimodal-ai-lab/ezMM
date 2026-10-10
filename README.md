@@ -118,7 +118,7 @@ Install with `pip install ezmm[ui]` and run
 ```
 python -m ezmm ui [--path REGISTRY_PATH] [--port 7878]
 ```
-to browse all items of the registry (and sequences rendered via `seq.render()`) at http://localhost:7878. The **Search** page (requires `ezmm[embed]`) finds items by meaning: search with a text query, with any file (image, video, audio, PDF, ...), or by an existing item ("Find similar items"). Items that are not embedded yet can be indexed directly from the search page.
+to browse all items of the registry (and sequences rendered via `seq.render()`) at http://localhost:7878. The **Search** page (requires `ezmm[embed]`) finds items by meaning: search with a text query, with any file (image, video, audio, PDF, ...), or by an existing item ("Find similar items"). Items that are not embedded yet can be indexed directly from the search page. Both the registry and the search results load more items as you scroll.
 
 ## Feature Overview
 - ✅ Image support

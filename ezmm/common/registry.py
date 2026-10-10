@@ -1068,22 +1068,29 @@ class ItemRegistry:
             index.load(n, batches())
 
     def search(self, vector: np.ndarray, model: str, kind: str | None = None, limit: int = 48,
-               include_missing: bool = False, exclude: tuple[str, int] | None = None, device: str | None = None) -> list[dict]:
+               include_missing: bool = False, exclude: tuple[str, int] | None = None, device: str | None = None,
+               offset: int = 0) -> list[dict]:
         """Returns the registry entries (as dicts with an additional `score`) whose embeddings
         are most similar (cosine similarity) to the given vector, most similar first. Only
         items with an embedding by the given model are considered. Embeddings are compared
-        in the dimension of the given vector (Matryoshka truncation)."""
+        in the dimension of the given vector (Matryoshka truncation). Use `offset` to page
+        through the results: the first `offset` matches (after filtering) are skipped."""
         index = self.get_embedding_index(model, dim=len(vector), device=device)
-        if len(index) == 0:
+        if len(index) == 0 or limit <= 0:
             return []
         scores = index.scores(vector)
-        results = []
-        for i in self._ranking(scores, n_candidates=limit * 4 if kind is None else limit * 40):
+        offset = max(offset, 0)
+        n_needed = offset + limit
+        results, n_matches = [], 0
+        for i in self._ranking(scores, n_candidates=n_needed * 4 if kind is None else n_needed * 40):
             item_kind, identifier = index.keys[i]
             if kind and item_kind != kind or (item_kind, identifier) == exclude:
                 continue
             row = self.get_row(item_kind, identifier)
             if row is None or row["canonical_id"] is not None or row["missing"] and not include_missing:
+                continue
+            n_matches += 1
+            if n_matches <= offset:
                 continue
             row["score"] = float(scores[i])
             results.append(row)
