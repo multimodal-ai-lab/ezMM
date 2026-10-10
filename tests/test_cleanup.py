@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ezmm import Image
@@ -101,3 +102,144 @@ def test_other_registry_files_are_untouched():
     assert report["orphans"] == []
     assert all(path.exists() for path in others)
     assert (root / "item_registry.db").exists()
+
+
+def test_default_locations_are_referenced(tmp_path):
+    """An item with a stale stored path heals to its default location, so that file is not orphaned."""
+    item_registry.connect()
+    default = _write(item_registry.path / "image" / "7.jpg")
+    _insert_items([(7, (tmp_path / "moved" / "7.jpg").as_posix(), None)])
+    report = item_registry.remove_orphaned_files(min_age=0)
+    assert report["orphans"] == []
+    assert default.exists()
+
+
+# -------------------------------------------------------------------------------------------------
+# Dead entries
+
+OLD = "2026-01-01T00:00:00+00:00"
+
+
+def _insert_items(rows: list[tuple], timestamp: str = OLD, missing: int = 0):
+    """Inserts registry rows (id, path, canonical_id) of images directly."""
+    with item_registry._transaction() as conn:
+        conn.executemany("""
+            INSERT INTO items(kind, id, path, sha256, size, canonical_id, missing, created_at, updated_at)
+            VALUES ('image', ?, ?, NULL, 6, ?, ?, ?, ?);
+        """, [(*row, missing, timestamp, timestamp) for row in rows])
+
+
+def _row_ids(*identifiers: int) -> list[int]:
+    return [item_registry.conn.execute("SELECT row_id FROM items WHERE kind = 'image' AND id = ?;",
+                                       (i,)).fetchone()[0] for i in identifiers]
+
+
+def _count(table: str) -> int:
+    return item_registry.conn.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
+
+
+def test_dead_entries_get_purged():
+    item_registry.connect()
+    kept = _write(item_registry.path / "image" / "4.jpg")
+    # Dead item 1 with an alias chain 3 -> 2 -> 1; item 4 is flagged missing, but its file exists
+    _insert_items([(1, "image/1.jpg", None), (2, None, 1), (3, None, 2)])
+    _insert_items([(4, "image/4.jpg", None)], missing=1)
+    dead_row, alias_row, kept_row = _row_ids(1, 2, 4)
+    with item_registry._transaction() as conn:
+        conn.executemany("INSERT INTO sources(url, item_row_id, created_at, last_accessed) VALUES (?, ?, ?, ?);",
+                         [("https://a.org/1.jpg", dead_row, OLD, OLD), ("https://a.org/2.jpg", alias_row, OLD, OLD),
+                          ("https://a.org/4.jpg", kept_row, OLD, OLD)])
+        conn.executemany("INSERT INTO embeddings(item_row_id, model, vector, created_at) VALUES (?, 'm', x'00', ?);",
+                         [(dead_row, OLD), (alias_row, OLD), (kept_row, OLD)])
+
+    report = item_registry.remove_dead_entries()
+    assert report["checked"] == 2
+    assert report["removed"] == [("image", 1)]
+    assert report["removed_aliases"] == 2
+    assert report["healed"] == report["skipped_unreachable"] == report["skipped_recent"] == 0
+    for identifier in (1, 2, 3):
+        assert item_registry.get_row("image", identifier) is None
+        assert item_registry.get(kind="image", identifier=identifier) is None
+    assert _count("items") == _count("sources") == _count("embeddings") == 1
+    assert item_registry.get_source_urls("image", 4) == ["https://a.org/4.jpg"]
+    assert kept.exists()
+
+
+def test_existing_files_are_kept():
+    img = Image("in/roses.jpg")  # File outside of the registry
+    item_registry.set_missing("image", img.id, True)
+    with item_registry._transaction() as conn:
+        conn.execute("UPDATE items SET created_at = ?, updated_at = ?;", (OLD, OLD))
+    report = item_registry.remove_dead_entries()
+    assert report["checked"] == 1 and report["removed"] == []
+    assert item_registry.get_row("image", img.id) is not None
+
+
+def test_dead_entries_heal_with_default_location(tmp_path):
+    item_registry.connect()
+    default = _write(item_registry.path / "image" / "7.jpg")
+    _insert_items([(7, (tmp_path / "moved" / "7.jpg").as_posix(), None)], missing=1)  # Stale path
+
+    report = item_registry.remove_dead_entries()
+    assert report["healed"] == 1 and report["removed"] == []
+    row = item_registry.get_row("image", 7)
+    assert row["path"] == default and not row["missing"]
+    # The healed item's file survives the subsequent orphan cleanup
+    assert item_registry.remove_orphaned_files(min_age=0)["orphans"] == []
+    assert default.exists()
+    assert item_registry.get(kind="image", identifier=7).file_path == default
+
+
+def test_unreachable_locations_are_skipped(tmp_path):
+    item_registry.connect()
+    (tmp_path / "mounted").mkdir()
+    _insert_items([(1, (tmp_path / "unmounted" / "1.jpg").as_posix(), None),  # Folder is missing, too
+                   (2, (tmp_path / "mounted" / "2.jpg").as_posix(), None),  # Folder exists, file is gone
+                   (3, "image/3.jpg", None)])  # Inside the registry, folder is missing: files are gone
+    report = item_registry.remove_dead_entries()
+    assert report["skipped_unreachable"] == 1
+    assert report["removed"] == [("image", 2), ("image", 3)]
+    assert item_registry.get_row("image", 1) is not None
+
+
+def test_recent_entries_are_skipped():
+    item_registry.connect()
+    _insert_items([(1, "image/1.jpg", None)], timestamp=datetime.now(UTC).isoformat(timespec="seconds"))
+    report = item_registry.remove_dead_entries()
+    assert report["skipped_recent"] == 1
+    assert report["checked"] == 0 and report["removed"] == []
+    assert item_registry.get_row("image", 1) is not None
+
+    report = item_registry.remove_dead_entries(min_age=0)  # No grace period
+    assert report["removed"] == [("image", 1)]
+    assert item_registry.get_row("image", 1) is None
+
+
+def test_entries_changed_during_check_are_kept(monkeypatch):
+    """An item updated by another process after its file check (e.g., healed) does not get purged."""
+    item_registry.connect()
+    _insert_items([(1, "image/1.jpg", None), (2, "image/2.jpg", None)])
+    check = item_registry._file_status
+
+    def check_and_update(row):
+        if row[1] == 1:
+            with item_registry._transaction() as conn:
+                conn.execute("UPDATE items SET updated_at = '2026-02-01T00:00:00+00:00' WHERE id = 1;")
+        return check(row)
+
+    monkeypatch.setattr(item_registry, "_file_status", check_and_update)
+    report = item_registry.remove_dead_entries()
+    assert report["removed"] == [("image", 2)]
+    assert item_registry.get_row("image", 1) is not None
+
+
+def test_dead_entries_dry_run_changes_nothing(tmp_path):
+    item_registry.connect()
+    _write(item_registry.path / "image" / "7.jpg")
+    _insert_items([(1, "image/1.jpg", None), (2, None, 1), (7, (tmp_path / "moved" / "7.jpg").as_posix(), None)])
+    rows = item_registry.conn.execute("SELECT * FROM items ORDER BY row_id;").fetchall()
+
+    report = item_registry.remove_dead_entries(dry_run=True)
+    assert report["removed"] == [("image", 1)]
+    assert report["removed_aliases"] == 1 and report["healed"] == 1
+    assert item_registry.conn.execute("SELECT * FROM items ORDER BY row_id;").fetchall() == rows
