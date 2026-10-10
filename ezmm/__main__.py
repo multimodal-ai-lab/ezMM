@@ -2,7 +2,7 @@
     python -m ezmm ui [--path PATH] [--host HOST] [--port PORT]   # Browse the registry in the browser
     python -m ezmm dedup [--path PATH] [--dry-run] [--verbose]    # Remove duplicate files from the registry
     python -m ezmm migrate [--path PATH]                          # Migrate a legacy registry DB
-    python -m ezmm check [--path PATH]                            # Check which items' files are missing
+    python -m ezmm check [--path PATH]                            # Check for missing files, refresh sizes
     python -m ezmm embed [--path PATH] [--kind KIND]              # Embed all items (for semantic search)
 """
 import argparse
@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None):
     migrate = commands.add_parser("migrate", help="Migrate a legacy registry DB to the current schema.")
 
     check = commands.add_parser("check", help="Check for all items whether their file exists "
-                                              "and update the registry's 'missing' flags.")
+                                              "and update the registry's 'missing' flags and file sizes.")
 
     embed = commands.add_parser("embed", help="Compute the embeddings of all items that are not embedded yet "
                                               "(makes them searchable in the web UI).")
@@ -72,7 +72,8 @@ def main(argv: list[str] | None = None):
     elif args.command == "check":
         result = item_registry.check_files()
         print(f"Checked {result['checked']} items: {result['missing']} files missing "
-              f"({result['changed']} flags updated).")
+              f"({result['changed']} flags updated), {result['sizes_updated']} file sizes updated. "
+              f"Total size: {format_size(item_registry.total_size())}.")
 
     elif args.command == "embed":
         from ezmm.embedding import INSTALL_HINT, MODEL_NAME, embed_registry, is_available

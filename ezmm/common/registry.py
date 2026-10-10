@@ -130,6 +130,14 @@ def _exists(path: Path | None) -> bool:
     return path is not None and path.exists()
 
 
+def _file_size(path: Path | None) -> int | None:
+    """Returns the size of the file in bytes, or None if it does not exist or cannot be read."""
+    try:
+        return path.stat().st_size
+    except (OSError, AttributeError):
+        return None
+
+
 class ItemRegistry:
     """Keeps track of all the occurring items efficiently.
     Also holds a cache of already loaded items for efficiency."""
@@ -614,14 +622,25 @@ class ItemRegistry:
 
     def check_files(self) -> dict:
         """Checks for all items whether their file exists and updates the `missing` flags
-        accordingly. Returns the number of checked and missing files."""
-        rows = self._execute("SELECT row_id, path, missing FROM items WHERE canonical_id IS NULL;")
+        accordingly. Also backfills unknown file sizes and refreshes outdated ones (a changed
+        size also invalidates the stored hash). Missing files keep their last known size.
+        Returns the number of checked and missing files, of updated flags (`changed`), and
+        of updated sizes (`sizes_updated`)."""
+        rows = self._execute("SELECT row_id, path, missing, size FROM items WHERE canonical_id IS NULL;")
         with progress_bar("Checking files", len(rows)) as update:
-            exists = _parallel_map(_exists, [self._from_db_path(path) for _, path, _ in rows], on_progress=update)
-        changes = [(int(not e), row_id) for (row_id, _, missing), e in zip(rows, exists) if bool(missing) == e]
+            sizes = _parallel_map(_file_size, [self._from_db_path(row[1]) for row in rows], on_progress=update)
+        changes = [(int(size is None), row_id) for (row_id, _, missing, _), size in zip(rows, sizes, strict=True)
+                   if bool(missing) != (size is None)]
+        now = _now()
+        size_updates = [(size, now, row_id) for (row_id, _, _, old_size), size in zip(rows, sizes, strict=True)
+                        if size is not None and size != old_size]
         with self._transaction():
             self.conn.executemany("UPDATE items SET missing = ? WHERE row_id = ?;", changes)
-        return dict(checked=len(rows), missing=exists.count(False), changed=len(changes))
+            # SQLite evaluates all expressions with the old values, so the hash is only cleared if the size was known
+            self.conn.executemany("UPDATE items SET sha256 = CASE WHEN size IS NULL THEN sha256 END, "
+                                  "size = ?, updated_at = ? WHERE row_id = ?;", size_updates)
+        return dict(checked=len(rows), missing=sizes.count(None), changed=len(changes),
+                    sizes_updated=len(size_updates))
 
     def contains(self, kind: str, item_path: Path | str) -> bool:
         return self._get_id_by_path(kind, item_path) is not None
@@ -887,12 +906,20 @@ class ItemRegistry:
         return self._execute(f"SELECT COUNT(*) FROM items WHERE {where};", params)[0][0]
 
     def stats(self) -> dict[str, dict]:
-        """Returns the number of items and the total file size per kind."""
+        """Returns per kind the number of items, their total (stored) file size in bytes, and
+        the number of items with unknown size (see `check_files()` to backfill them)."""
         rows = self._execute("""
-            SELECT kind, COUNT(*), COALESCE(SUM(size), 0) FROM items
+            SELECT kind, COUNT(*), COALESCE(SUM(size), 0), COUNT(*) - COUNT(size) FROM items
             WHERE canonical_id IS NULL GROUP BY kind;
         """)
-        return {kind: dict(count=count, size=size) for kind, count, size in rows}
+        return {kind: dict(count=count, size=size, unknown_size=unknown)
+                for kind, count, size, unknown in rows}
+
+    def total_size(self, kind: str | None = None) -> int:
+        """Returns the total stored file size in bytes of all items (optionally of the given kind),
+        excluding aliases. Fast, as it reads only the DB; items with unknown size count as 0."""
+        where, params = self._filter(kind, None)
+        return self._execute(f"SELECT COALESCE(SUM(size), 0) FROM items WHERE {where};", params)[0][0]
 
     @staticmethod
     def _filter(kind: str | None, query: str | None, include_missing: bool = True) -> tuple[str, tuple]:

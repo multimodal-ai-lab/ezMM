@@ -8,7 +8,9 @@ from ezmm.common import item_registry
 def test_check(capsys):
     Image("in/roses.jpg")
     main(["--path", str(item_registry.path), "check"])
-    assert "Checked 1 items: 0 files missing" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Checked 1 items: 0 files missing" in out
+    assert "0 file sizes updated" in out and "Total size:" in out
 
 
 def test_dedup_dry_run(capsys):
