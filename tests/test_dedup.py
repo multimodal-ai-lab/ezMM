@@ -188,3 +188,30 @@ def test_dry_run_saves_hashes():
     assert item_registry.get_row("image", 2)["canonical_id"] is None
     assert dup_path.exists()
     assert item_registry.deduplicate(dry_run=True)["hashed"] == 0  # Nothing left to hash
+
+
+def test_hash_and_alias_lookups_use_their_indices():
+    """Without planner statistics, `ORDER BY id` made SQLite walk the (kind, id) index, i.e.
+    every item of the kind, instead of looking the hash up: 0.46 s per lookup on a registry of
+    3.8M items, which serialized all registrations. The lookups must use their own indices."""
+    item_registry._ensure_connected()
+    conn = item_registry.conn
+    conn.execute("DROP TABLE IF EXISTS sqlite_stat1;")  # As a registry that was never analyzed
+    for statement, params in [
+        ("SELECT id FROM items WHERE kind = ? AND sha256 = ? AND canonical_id IS NULL ORDER BY +id LIMIT 1;",
+         ("image", "0" * 64)),
+        ("SELECT id FROM items WHERE kind = ? AND canonical_id = ? ORDER BY +id;", ("image", 1)),
+    ]:
+        plan = " ".join(row[-1] for row in conn.execute("EXPLAIN QUERY PLAN " + statement, params))
+        assert "sqlite_autoindex_items_1" not in plan, plan
+    # The statements as the registry runs them
+    import inspect
+    source = inspect.getsource(type(item_registry))
+    assert "canonical_id IS NULL ORDER BY +id LIMIT 1" in source
+    assert "canonical_id = ? ORDER BY +id" in source
+
+
+def test_statistics_are_gathered_once():
+    item_registry._ensure_connected()
+    assert item_registry.conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1';").fetchone() is not None
