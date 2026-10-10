@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import kind_icon, item_card %}
+{% from "_macros.html" import kind_icon %}
 {% set nav = "items" %}
 {% block title %}{{ (kind ~ 's') | capitalize if kind else 'Items' }} · ezMM{% endblock %}
 
@@ -44,11 +44,7 @@
 </div>
 
 {% if entries %}
-<div class="grid">
-    {% for e in entries %}
-    {{ item_card(e) }}
-    {% endfor %}
-</div>
+{% include "_cards.html" %}
 
 {% if n_pages > 1 %}
 <nav class="pagination" aria-label="Pagination">

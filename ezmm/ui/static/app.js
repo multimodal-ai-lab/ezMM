@@ -72,10 +72,48 @@
         });
     }
 
-    // Preview videos on hover
-    document.querySelectorAll(".card video").forEach((video) => {
-        const card = video.closest(".card");
-        card.addEventListener("mouseenter", () => video.play().catch(() => {}));
-        card.addEventListener("mouseleave", () => video.pause());
-    });
+    // Preview videos on hover (delegated, so it also works for cards loaded later)
+    ["mouseenter", "mouseleave"].forEach((type) => document.addEventListener(type, (event) => {
+        const video = event.target.matches?.(".card") && event.target.querySelector("video");
+        if (!video) return;
+        if (type === "mouseenter") video.play().catch(() => {});
+        else video.pause();
+    }, true));
+
+    // Endless scrolling: append the next page of cards when the end of the grid comes into view
+    const grid = document.querySelector(".grid[data-next]");
+    if (grid && grid.dataset.next && "IntersectionObserver" in window) {
+        const pager = document.querySelector(".pagination");
+        if (pager) pager.style.display = "none";
+        const loader = document.createElement("div");
+        loader.className = "loader muted small";
+        loader.innerHTML = '<span class="spinner" aria-hidden="true"></span> Loading more…';
+        grid.after(loader);
+        let loading = false;
+
+        const observer = new IntersectionObserver(async (entries) => {
+            if (loading || !entries.some((entry) => entry.isIntersecting)) return;
+            loading = true;
+            try {
+                const url = new URL(grid.dataset.next, location.href);
+                url.searchParams.set("partial", "1");
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(response.statusText);
+                const html = new DOMParser().parseFromString(await response.text(), "text/html");
+                const page = html.querySelector(".grid[data-next]");
+                const shown = new Set([...grid.children].map((card) => card.getAttribute("href")));
+                [...page.children].forEach((card) => shown.has(card.getAttribute("href")) || grid.append(card));
+                grid.dataset.next = page.dataset.next;
+            } catch (e) {
+                grid.dataset.next = "";
+                if (pager) pager.style.display = "";
+                showToast("Could not load more items");
+            }
+            loading = false;
+            observer.unobserve(loader);
+            if (grid.dataset.next) observer.observe(loader);  // Re-checks if the loader is still in view
+            else loader.remove();
+        }, {rootMargin: "600px 0px"});
+        observer.observe(loader);
+    }
 })();
