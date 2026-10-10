@@ -264,9 +264,20 @@ class ItemRegistry:
                 self.migrate()
             self.conn.execute(EMBEDDINGS_SCHEMA)
             self.conn.execute(ALIASES_INDEX)
+            self._ensure_statistics()
             columns = [row[1] for row in self.conn.execute("PRAGMA table_info(embeddings);").fetchall()]
             if "dtype" not in columns:  # Added in ezMM 0.7.0 during development
                 self.conn.execute("ALTER TABLE embeddings ADD COLUMN dtype TEXT NOT NULL DEFAULT 'float32';")
+
+    def _ensure_statistics(self):
+        """Gathers the query planner's statistics (`ANALYZE`) once, if the DB has none. Without
+        them, SQLite guesses how selective an index is and may pick a scan over millions of rows
+        (see `_get_id_by_sha256()`). About a second for millions of items; afterwards SQLite keeps
+        using them, and `ANALYZE` can be run again any time."""
+        has_stats = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1';").fetchone()
+        if not has_stats:
+            self.conn.execute("ANALYZE;")
 
     def _create_schema(self):
         """Creates all tables and indices (if not existing) and sets the schema version."""
@@ -472,7 +483,9 @@ class ItemRegistry:
 
     def get_aliases(self, kind: str, identifier: int) -> list[int]:
         """Returns the IDs of all removed duplicates that now resolve to the given item."""
-        rows = self._execute("SELECT id FROM items WHERE kind = ? AND canonical_id = ? ORDER BY id;",
+        # `+id`: sorting by the primary key's index would scan every item of the kind (see
+        # `_get_id_by_sha256()`); the few aliases are sorted instead
+        rows = self._execute("SELECT id FROM items WHERE kind = ? AND canonical_id = ? ORDER BY +id;",
                              (kind, identifier))
         return [i for (i,) in rows]
 
@@ -501,8 +514,13 @@ class ItemRegistry:
         return rows[0][0] if rows else None
 
     def _get_id_by_sha256(self, kind: str, sha256: str) -> int | None:
+        # `+id`: with `ORDER BY id`, SQLite walked the (kind, id) index to save a sort, i.e. every
+        # item of the kind, instead of looking the hash up: 0.46 s on a registry of 3.8M items,
+        # twice per new item and once inside the write transaction, which serialized all
+        # registrations (~1 s per image with 4 threads). Now the hash index finds the one or two
+        # rows, which are sorted: 0.0001 s.
         rows = self._execute("""
-            SELECT id FROM items WHERE kind = ? AND sha256 = ? AND canonical_id IS NULL ORDER BY id LIMIT 1;
+            SELECT id FROM items WHERE kind = ? AND sha256 = ? AND canonical_id IS NULL ORDER BY +id LIMIT 1;
         """, (kind, sha256))
         return rows[0][0] if rows else None
 
