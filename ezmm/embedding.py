@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
 
-import cv2
 import imageio_ffmpeg
 import numpy as np
 from PIL import Image as PillowImageModule
@@ -134,7 +133,11 @@ def get_model():
             dtype = torch.bfloat16 if gpu and torch.cuda.is_bf16_supported() else torch.float32
             gpu_name = f" ({torch.cuda.get_device_name(device)})" if gpu else ""
             logger.info(f"Loading embedding model {MODEL_NAME} on {device}{gpu_name}...")
-            _model = SentenceTransformer(MODEL_NAME, device=device, model_kwargs={"dtype": dtype})
+            kwargs = dict(device=device, model_kwargs={"dtype": dtype})
+            try:  # Load from the local cache without contacting the Hugging Face Hub
+                _model = SentenceTransformer(MODEL_NAME, local_files_only=True, **kwargs)
+            except OSError:  # Not cached yet: download it
+                _model = SentenceTransformer(MODEL_NAME, **kwargs)
         return _model
 
 
@@ -353,29 +356,92 @@ def _fit(size: tuple[int, int], max_pixels: int) -> tuple[int, int]:
 
 def sample_video_frames(path: Path | str, fps: float = VIDEO_FPS,
                         max_frames: int = MAX_VIDEO_FRAMES) -> list[np.ndarray]:
-    """Returns RGB frames sampled from the video at the given rate (evenly sampled
-    if the video has more than `max_frames` frames at that rate)."""
-    cap = cv2.VideoCapture(str(path))
-    try:
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        video_fps = cap.get(cv2.CAP_PROP_FPS) or 0
-        if total_frames <= 0:
-            return []
-        duration = total_frames / video_fps if video_fps > 0 else 1
-        n_frames = int(min(max(round(duration * fps), 1), max_frames, total_frames))
-        frames = []
-        for frame_id in np.linspace(0, total_frames - 1, n_frames, dtype=int):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_id))
-            success, frame = cap.read()
-            if not success or frame is None:
-                break
-            height, width = frame.shape[:2]
-            if width * height > MAX_FRAME_PIXELS:
-                frame = cv2.resize(frame, _fit((width, height), MAX_FRAME_PIXELS), interpolation=cv2.INTER_AREA)
-            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        return frames
-    finally:
-        cap.release()
+    """Returns RGB frames sampled from the video at the given rate (evenly sampled if the video
+    has more than `max_frames` frames at that rate), downscaled to at most `MAX_FRAME_PIXELS`
+    pixels. Decodes only the keyframes if there are enough of them (fast), else all frames.
+    Interlaced frames get deinterlaced. Returns no frames if the file has no (decodable) video."""
+    info = probe_video(path)
+    if info is None:
+        return []
+    duration = info["duration"] or max_frames / fps  # Unknown duration: sample from the start
+    n_frames = int(min(max(round(duration * fps), 1), max_frames))
+    width, height = _fit(info["size"], MAX_FRAME_PIXELS)
+    size = max(2, width - width % 2), max(2, height - height % 2)
+    scale = f"scale={size[0]}:{size[1]}:flags=area"
+
+    # Decode only keyframes and select the first one in each interval of length duration / n_frames
+    interval = f"{duration / n_frames:.4f}"
+    select = f"select='isnan(prev_selected_t)+gt(floor(t/{interval})\\,floor(prev_selected_t/{interval}))'"
+    video_filter = f"{select},yadif=mode=send_frame:deint=interlaced,{scale}"
+    frames, errors = _decode_frames(path, info, ["-skip_frame", "nokey"], video_filter, n_frames, size)
+
+    if 2 * len(frames) < n_frames:  # Too few keyframes (typical for short clips): decode all frames
+        n_total = max(1, round(duration * info["fps"]))  # Estimated, so stay a bit inside the video
+        indices = sorted(set(np.linspace(0, max(0, n_total - 3), n_frames, dtype=int).tolist()))
+        select = "select='" + "+".join(f"eq(n\\,{i})" for i in indices) + "'"
+        video_filter = f"bwdif=mode=send_frame:deint=interlaced,{select},{scale}"
+        all_frames, errors = _decode_frames(path, info, [], video_filter, len(indices), size)
+        frames = max(frames, all_frames, key=len)
+
+    if not frames:
+        logger.warning(f"Could not decode any frames of the video {path}: {errors.strip()[-500:]}")
+    return frames
+
+
+# Fixes reserved (invalid) colour metadata in the bitstream, which FFmpeg rejects ("Invalid color
+# space"), by setting it to unspecified (2). Filters (e.g., setparams) come too late for that.
+_COLOR_FIX_BSF = {"h264": "h264_metadata", "hevc": "hevc_metadata"}
+_COLOR_FIX_ARGS = "colour_primaries=2:transfer_characteristics=2:matrix_coefficients=2"
+
+
+def probe_video(path: Path | str) -> dict | None:
+    """Returns the stream index, codec, size (as displayed, i.e., rotated), fps, and duration
+    (None if unknown) of the file's first video stream, and whether its colour metadata
+    contains reserved values. Returns None if the file has no video stream."""
+    result = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-nostdin", "-i", str(path)],
+                            capture_output=True, check=False)  # Fails (no output file given), but prints the info
+    text = result.stderr.decode(errors="ignore")
+    streams = re.split(r"\n\s*Stream #", text)
+    for stream in streams[1:]:
+        header = stream.split("\n", 1)[0]
+        match = re.match(r"\d+:(\d+).*?: Video: (\w+)", header)
+        size = re.search(r", ([1-9]\d*)x([1-9]\d*)", header)
+        if not match or not size or "(attached pic)" in header:
+            continue
+        width, height = int(size[1]), int(size[2])
+        rotation = re.search(r"rotation of (-?[\d.]+) degrees", stream)
+        if rotation and round(float(rotation[1])) % 180 == 90:  # FFmpeg rotates the frames upright
+            width, height = height, width
+        fps = re.search(r"([\d.]+) fps", header) or re.search(r"([\d.]+) tbr", header)
+        duration = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", streams[0])
+        return dict(index=int(match[1]), codec=match[2], size=(width, height),
+                    fps=float(fps[1]) if fps and float(fps[1]) > 0 else 25.0,
+                    duration=int(duration[1]) * 3600 + int(duration[2]) * 60 + float(duration[3]) if duration else None,
+                    reserved_color="reserved" in header)
+    return None
+
+
+def _decode_frames(path: Path | str, info: dict, input_args: list[str], video_filter: str,
+                   max_frames: int, size: tuple[int, int]) -> tuple[list[np.ndarray], str]:
+    """Decodes up to `max_frames` frames of the video through the filter (which must scale the
+    frames to `size`) with FFmpeg. Returns the RGB frames and FFmpeg's error messages."""
+    bsf = _COLOR_FIX_BSF.get(info["codec"])
+    color_fix = ["-bsf:v", f"{bsf}={_COLOR_FIX_ARGS}"] if bsf else []
+
+    def run(fix: list[str]) -> subprocess.CompletedProcess:
+        cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-v", "error", "-threads", "0", *fix, *input_args,
+               "-i", str(path), "-map", f"0:{info['index']}", "-vf", video_filter, "-fps_mode", "passthrough",
+               "-frames:v", str(max_frames), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        return subprocess.run(cmd, capture_output=True, check=False)  # Partial output is used on errors, too
+
+    result = run(color_fix if info["reserved_color"] else [])
+    if not result.stdout and color_fix and not info["reserved_color"] and b"Invalid color" in result.stderr:
+        result = run(color_fix)  # Retry with fixed colour metadata
+    width, height = size
+    n_frames = len(result.stdout) // (width * height * 3)
+    data = bytearray(result.stdout[:n_frames * width * height * 3])  # Writable, like decoded images
+    frames = list(np.frombuffer(data, dtype=np.uint8).reshape(n_frames, height, width, 3))
+    return frames, result.stderr.decode(errors="ignore")
 
 
 def load_audio(path: Path | str, max_seconds: float = MAX_AUDIO_SECONDS) -> np.ndarray | None:
