@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,7 @@ DEDUP_BATCH_SIZE = 1000  # Groups of duplicates removed per transaction
 HASH_BATCH_SIZE = 1000  # Hashes saved per transaction during deduplication (makes it resumable)
 BUSY_TIMEOUT = 60  # Seconds a write waits for other writers (threads or processes) to finish
 ACCESS_UPDATE_INTERVAL = timedelta(hours=1)  # Sources' last access times are updated at most this often
+ORPHAN_MIN_AGE = 3600  # Seconds an unreferenced file must be unchanged before it counts as orphaned
 
 SCHEMA = """
     CREATE TABLE IF NOT EXISTS items (
@@ -128,6 +130,25 @@ def _decode_vector(blob: bytes, dtype: str) -> np.ndarray:
 
 def _exists(path: Path | None) -> bool:
     return path is not None and path.exists()
+
+
+def _normalize_path(path: Path | str) -> str:
+    """Returns a normalized form of the (absolute) path for comparisons (collapses '..',
+    unifies separators and, on case-insensitive Windows, the case)."""
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _scan_files(folder: Path) -> Iterable[os.DirEntry]:
+    """Yields all files inside the folder and its subfolders (without following symlinks)."""
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    yield from _scan_files(Path(entry.path))
+                else:
+                    yield entry
+    except FileNotFoundError:
+        return
 
 
 class ItemRegistry:
@@ -730,6 +751,60 @@ class ItemRegistry:
                                       [(self._to_db_path(keeper_path), int(not keeper_exists), now, keeper_row_id)
                                        for _, keeper_row_id, _, keeper_path, keeper_exists, _ in batch])
             update(start + len(batch))
+
+    # ---------------------------------------------------------------------------------------------
+    # Orphaned files
+
+    def remove_orphaned_files(self, dry_run: bool = False, min_age: float = ORPHAN_MIN_AGE) -> dict:
+        """Deletes orphaned files: files inside the registry's item folders (one per kind, plus
+        `items/` holding the temporary files of items created from binary data) that are not
+        referenced by any item, e.g., left over from interrupted registrations, removed items,
+        or older ezMM versions. Nothing else in the registry root (the DB, its backups,
+        rendered sequences, ...) is touched. Returns a report.
+
+        Files changed within the last `min_age` seconds are skipped, because a new item's file
+        gets written before its registration completes (possibly in another thread or process).
+        With `dry_run=True`, the orphans are only reported. Takes one directory scan and one DB
+        query in total, so it scales to millions of files."""
+        report = dict(scanned=0, orphans=[], freed_bytes=0, skipped_recent=0, deleted=0)
+
+        # Scan the files before loading the referenced paths, so that all files registered at scan
+        # time are known as referenced. Files registered later are recent and thus skipped.
+        threshold = time.time() - min_age
+        candidates = []  # (path, size) of all files old enough
+        folders = [self.path / kind for kind in KIND2ITEM] + [self.path / "items"]
+        for folder in folders:
+            for entry in _scan_files(folder):
+                report["scanned"] += 1
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue  # Deleted in the meantime
+                if stat.st_mtime > threshold:
+                    report["skipped_recent"] += 1
+                else:
+                    candidates.append((entry.path, stat.st_size))
+
+        # All rows, incl. those flagged as missing (their files may have come back)
+        referenced = {_normalize_path(self._from_db_path(path))
+                      for (path,) in self._execute("SELECT path FROM items WHERE path IS NOT NULL;")}
+        orphans = [(path, size) for path, size in candidates if _normalize_path(path) not in referenced]
+        report["orphans"] = [Path(path).as_posix() for path, _ in orphans]
+        report["freed_bytes"] = sum(size for _, size in orphans)
+        if dry_run:
+            return report
+
+        with progress_bar("Deleting orphans", len(orphans)) as update:
+            for done, (path, size) in enumerate(orphans, start=1):
+                try:
+                    os.remove(path)
+                    report["deleted"] += 1
+                except OSError as e:  # E.g., deleted in the meantime or in use
+                    report["freed_bytes"] -= size
+                    if not isinstance(e, FileNotFoundError):
+                        logger.warning(f"Could not delete orphaned file '{path}': {e}")
+                update(done)
+        return report
 
     # ---------------------------------------------------------------------------------------------
     # Embeddings

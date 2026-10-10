@@ -16,6 +16,26 @@ def test_dedup_dry_run(capsys):
     assert "[DRY RUN] Would remove 0 duplicates" in capsys.readouterr().out
 
 
+def test_cleanup(capsys):
+    from tests.test_cleanup import _write
+    orphans = [_write(item_registry.path / "items" / f"{i}.jpg") for i in range(25)]
+    _write(item_registry.path / "items" / "recent.jpg", age=0)
+
+    main(["cleanup", "--path", str(item_registry.path), "--dry-run"])
+    out = capsys.readouterr().out
+    assert out.count("/items/") == 20
+    assert "... and 5 more (use --verbose to list all)" in out
+    assert "[DRY RUN] Would delete 25 orphaned files (150 B) of 26 scanned files. Skipped 1 files" in out
+    assert all(path.exists() for path in orphans)
+
+    main(["--path", str(item_registry.path), "cleanup", "--min-age", "0.5", "--verbose"])
+    out = capsys.readouterr().out
+    assert out.count("/items/") == 25
+    assert "Deleted 25 orphaned files" in out
+    assert "within the last 0.5 hours" in out
+    assert not any(path.exists() for path in orphans)
+
+
 def test_embed_without_embed_extra(capsys, monkeypatch):
     monkeypatch.setattr(embedding, "is_available", lambda: False)
     with pytest.raises(SystemExit) as exit_info:
