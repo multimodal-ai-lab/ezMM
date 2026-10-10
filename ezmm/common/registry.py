@@ -1122,7 +1122,7 @@ class ItemRegistry:
         where, params = self._filter(kind, query, include_missing)
         rows = self._execute(f"""
             SELECT {self._COLUMNS} FROM items WHERE {where}
-            ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?;
+            ORDER BY created_at DESC, id DESC, row_id DESC LIMIT ? OFFSET ?;
         """, params + (limit, offset))
         return [self._row_to_dict(row) for row in rows]
 
