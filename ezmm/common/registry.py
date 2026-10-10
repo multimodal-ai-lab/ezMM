@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,8 @@ DEDUP_BATCH_SIZE = 1000  # Groups of duplicates removed per transaction
 HASH_BATCH_SIZE = 1000  # Hashes saved per transaction during deduplication (makes it resumable)
 BUSY_TIMEOUT = 60  # Seconds a write waits for other writers (threads or processes) to finish
 ACCESS_UPDATE_INTERVAL = timedelta(hours=1)  # Sources' last access times are updated at most this often
+ORPHAN_MIN_AGE = 3600  # Seconds an unreferenced file (or a dead entry) must be unchanged before it gets removed
+PURGE_BATCH_SIZE = 500  # Dead entries purged per transaction (also bounds the number of SQL parameters)
 
 SCHEMA = """
     CREATE TABLE IF NOT EXISTS items (
@@ -128,6 +131,33 @@ def _decode_vector(blob: bytes, dtype: str) -> np.ndarray:
 
 def _exists(path: Path | None) -> bool:
     return path is not None and path.exists()
+
+
+def _file_size(path: Path | None) -> int | None:
+    """Returns the size of the file in bytes, or None if it does not exist or cannot be read."""
+    try:
+        return path.stat().st_size
+    except (OSError, AttributeError):
+        return None
+
+
+def _normalize_path(path: Path | str) -> str:
+    """Returns a normalized form of the (absolute) path for comparisons (collapses '..',
+    unifies separators and, on case-insensitive Windows, the case)."""
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _scan_files(folder: Path) -> Iterable[os.DirEntry]:
+    """Yields all files inside the folder and its subfolders (without following symlinks)."""
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    yield from _scan_files(Path(entry.path))
+                else:
+                    yield entry
+    except FileNotFoundError:
+        return
 
 
 class ItemRegistry:
@@ -359,6 +389,11 @@ class ItemRegistry:
         path = Path(path)
         return path if path.is_absolute() else self.path / path
 
+    def _default_path(self, kind: str, identifier: int, path: str) -> Path:
+        """Returns the item's default location inside the registry (see `Item._default_file_path`),
+        given its stored path (which determines the suffix)."""
+        return self.path / kind / f"{identifier}{Path(path).suffix}"
+
     def is_inside(self, path: Path) -> bool:
         """Returns True iff the path is located inside the registry's root directory."""
         return Path(path).absolute().is_relative_to(self.path)
@@ -584,6 +619,17 @@ class ItemRegistry:
         item. If the URL pointed to another item before (i.e., the content behind the URL
         changed), it now points to the given item. Returns True iff the source is new for
         this item. Must be called within a transaction."""
+        # TODO: Keep the history of sources (schema v4). Today, each URL points to exactly one item
+        #  (`sources.url` is UNIQUE), so when the content behind a URL changes (e.g., a web page updates
+        #  its media), the previous item loses the URL and possibly all of its provenance. The v1 -> v3
+        #  migration lost URLs the same way when several legacy rows shared one URL (the original URLs
+        #  are still in the `item_registry.v1.bak.db` backups). Plan:
+        #  - Let a URL point to several items: UNIQUE(url, item_row_id) instead of UNIQUE(url), and keep
+        #    `created_at` (first seen) and `last_accessed` (last seen) per link.
+        #  - `get_by_source_url()` returns the most recently delivered item; `get_sources()` lists all
+        #    URLs that ever delivered an item.
+        #  - Migration to v4 restores lost URLs from the v1 backups where available.
+        #  - Older ezMM versions cannot read v4 registries (needs a schema version bump and a backup).
         if not url:
             return False
         now = _now()
@@ -614,14 +660,25 @@ class ItemRegistry:
 
     def check_files(self) -> dict:
         """Checks for all items whether their file exists and updates the `missing` flags
-        accordingly. Returns the number of checked and missing files."""
-        rows = self._execute("SELECT row_id, path, missing FROM items WHERE canonical_id IS NULL;")
+        accordingly. Also backfills unknown file sizes and refreshes outdated ones (a changed
+        size also invalidates the stored hash). Missing files keep their last known size.
+        Returns the number of checked and missing files, of updated flags (`changed`), and
+        of updated sizes (`sizes_updated`)."""
+        rows = self._execute("SELECT row_id, path, missing, size FROM items WHERE canonical_id IS NULL;")
         with progress_bar("Checking files", len(rows)) as update:
-            exists = _parallel_map(_exists, [self._from_db_path(path) for _, path, _ in rows], on_progress=update)
-        changes = [(int(not e), row_id) for (row_id, _, missing), e in zip(rows, exists) if bool(missing) == e]
+            sizes = _parallel_map(_file_size, [self._from_db_path(row[1]) for row in rows], on_progress=update)
+        changes = [(int(size is None), row_id) for (row_id, _, missing, _), size in zip(rows, sizes, strict=True)
+                   if bool(missing) != (size is None)]
+        now = _now()
+        size_updates = [(size, now, row_id) for (row_id, _, _, old_size), size in zip(rows, sizes, strict=True)
+                        if size is not None and size != old_size]
         with self._transaction():
             self.conn.executemany("UPDATE items SET missing = ? WHERE row_id = ?;", changes)
-        return dict(checked=len(rows), missing=exists.count(False), changed=len(changes))
+            # SQLite evaluates all expressions with the old values, so the hash is only cleared if the size was known
+            self.conn.executemany("UPDATE items SET sha256 = CASE WHEN size IS NULL THEN sha256 END, "
+                                  "size = ?, updated_at = ? WHERE row_id = ?;", size_updates)
+        return dict(checked=len(rows), missing=sizes.count(None), changed=len(changes),
+                    sizes_updated=len(size_updates))
 
     def contains(self, kind: str, item_path: Path | str) -> bool:
         return self._get_id_by_path(kind, item_path) is not None
@@ -730,6 +787,186 @@ class ItemRegistry:
                                       [(self._to_db_path(keeper_path), int(not keeper_exists), now, keeper_row_id)
                                        for _, keeper_row_id, _, keeper_path, keeper_exists, _ in batch])
             update(start + len(batch))
+
+    # ---------------------------------------------------------------------------------------------
+    # Dead entries
+
+    def remove_dead_entries(self, dry_run: bool = False, min_age: float = ORPHAN_MIN_AGE) -> dict:
+        """Purges dead registry entries: items whose file does not exist anymore, together with
+        their aliases, sources, and embeddings. This is irreversible: references to purged items
+        (e.g., `<image:5>` in stored texts) do not resolve anymore. Returns a report.
+
+        To be conservative, each item's file is checked freshly (the `missing` flag is ignored):
+        - If the file exists at the item's default location (`<registry>/<kind>/<id><suffix>`),
+          the item is not dead: its stored path gets healed (counted as `healed`).
+        - If the file is located outside the registry and its folder does not exist either
+          (e.g., an unmounted drive or network share), or cannot be accessed, the item is
+          kept (counted as `skipped_unreachable`). Inside the registry, a missing folder means
+          that the files are really gone, as the registry root itself is reachable.
+        - Items created or updated within the last `min_age` seconds are skipped, as they may
+          be in the middle of a registration or move by another thread or process.
+        With `dry_run=True`, nothing gets changed. Files are checked in parallel; the DB work
+        takes a few queries plus batched writes, so it scales to millions of items."""
+        report = dict(checked=0, removed=[], removed_aliases=0, healed=0,
+                      skipped_unreachable=0, skipped_recent=0)
+        threshold = (datetime.now(UTC) - timedelta(seconds=min_age)).isoformat(timespec="seconds")
+        rows = []  # (row_id, kind, id, path, updated_at) of all canonical items old enough
+        for row_id, kind, identifier, path, created_at, updated_at in self._execute(
+                "SELECT row_id, kind, id, path, created_at, updated_at FROM items WHERE canonical_id IS NULL;"):
+            if max(created_at, updated_at) > threshold:
+                report["skipped_recent"] += 1
+            else:
+                rows.append((row_id, kind, identifier, path, updated_at))
+        report["checked"] = len(rows)
+
+        # Check the files (in parallel and outside of any transaction, as it may be slow)
+        with progress_bar("Checking files", len(rows)) as update:
+            statuses = _parallel_map(self._file_status, [row[1:4] for row in rows], on_progress=update)
+        healed = [row for row, status in zip(rows, statuses, strict=True) if status == "healed"]
+        dead = [row for row, status in zip(rows, statuses, strict=True) if status == "dead"]
+        report["healed"] = len(healed)
+        report["skipped_unreachable"] = statuses.count("unreachable")
+
+        # Aliases resolving to dead items (repeated to be robust to alias chains)
+        aliases_of: dict[tuple[str, int], list[int]] = {(kind, identifier): [] for _, kind, identifier, _, _ in dead}
+        remaining = self._execute("SELECT row_id, kind, id, canonical_id FROM items WHERE canonical_id IS NOT NULL;")
+        dead_ids = {key: key for key in aliases_of}  # (kind, ID) -> (kind, ID) of the dead canonical item
+        while remaining:
+            unresolved = []
+            for alias in remaining:
+                row_id, kind, identifier, canonical_id = alias
+                target = dead_ids.get((kind, canonical_id))
+                if target is None:
+                    unresolved.append(alias)
+                else:
+                    aliases_of[target].append(row_id)
+                    dead_ids[(kind, identifier)] = target
+            if len(unresolved) == len(remaining):
+                break
+            remaining = unresolved
+        report["removed"] = [(kind, identifier) for _, kind, identifier, _, _ in dead]
+        report["removed_aliases"] = sum(len(aliases) for aliases in aliases_of.values())
+        if dry_run:
+            return report
+
+        if healed:  # Unless changed in the meantime
+            now = _now()
+            with self._transaction():
+                self.conn.executemany("UPDATE items SET path = ?, missing = 0, updated_at = ? "
+                                      "WHERE row_id = ? AND updated_at = ?;",
+                                      [(self._to_db_path(self._default_path(kind, identifier, path)), now,
+                                        row_id, updated_at) for row_id, kind, identifier, path, updated_at in healed])
+        with progress_bar("Purging entries", len(dead), unit="item") as update:
+            self._purge(dead, aliases_of, report, update)
+        self.clear_cache()  # Cached objects of purged (and healed) items are outdated now
+        return report
+
+    def _file_status(self, row: tuple[str, int, str | None]) -> str:
+        """Returns whether the item's (kind, ID, stored path) file 'exists', can be 'healed' with
+        the default location, is 'unreachable' (see `remove_dead_entries()`), or is 'dead'."""
+        kind, identifier, path = row
+        if path is None:
+            return "dead"  # Cannot point to any file
+        stored = self._from_db_path(path)
+        try:
+            if stored.exists():
+                return "exists"
+            if self._default_path(kind, identifier, path).exists():
+                return "healed"
+            if not self.is_inside(stored) and not stored.parent.exists():
+                return "unreachable"
+        except OSError:  # E.g., no permission to access the location
+            return "unreachable"
+        return "dead"
+
+    def _purge(self, dead: list[tuple], aliases_of: dict[tuple[str, int], list[int]],
+               report: dict, update: Callable[[int], None]):
+        """Deletes the dead items (see `remove_dead_entries()`) with their aliases, sources,
+        and embeddings, in batches per (short) transaction. Items that changed since they were
+        checked (e.g., got healed by another process) are kept and dropped from the report."""
+        kept = set()
+        for start in range(0, len(dead), PURGE_BATCH_SIZE):
+            batch = dead[start:start + PURGE_BATCH_SIZE]
+            with self._transaction():
+                # Re-check within the transaction that the items are unchanged
+                current = {row_id: (path, updated_at) for row_id, path, updated_at in self.conn.execute(
+                    f"SELECT row_id, path, updated_at FROM items WHERE canonical_id IS NULL "
+                    f"AND row_id IN ({', '.join('?' * len(batch))});", [row[0] for row in batch])}
+                unchanged = []
+                for row in batch:
+                    row_id, kind, identifier, path, updated_at = row
+                    if current.get(row_id) == (path, updated_at):
+                        unchanged.append(row)
+                    else:
+                        kept.add((kind, identifier))
+                row_ids = [(row_id,) for row_id, kind, identifier, _, _ in unchanged
+                           for row_id in (row_id, *aliases_of[(kind, identifier)])]
+                self.conn.executemany("DELETE FROM sources WHERE item_row_id = ?;", row_ids)
+                self.conn.executemany("DELETE FROM embeddings WHERE item_row_id = ?;", row_ids)
+                self.conn.executemany("DELETE FROM items WHERE row_id = ?;", row_ids)
+            update(start + len(batch))
+        if kept:
+            report["removed"] = [key for key in report["removed"] if key not in kept]
+            report["removed_aliases"] = sum(len(aliases_of[key]) for key in report["removed"])
+
+    # ---------------------------------------------------------------------------------------------
+    # Orphaned files
+
+    def remove_orphaned_files(self, dry_run: bool = False, min_age: float = ORPHAN_MIN_AGE) -> dict:
+        """Deletes orphaned files: files inside the registry's item folders (one per kind, plus
+        `items/` holding the temporary files of items created from binary data) that are not
+        referenced by any item, e.g., left over from interrupted registrations, removed items,
+        or older ezMM versions. Nothing else in the registry root (the DB, its backups,
+        rendered sequences, ...) is touched. Returns a report.
+
+        Files changed within the last `min_age` seconds are skipped, because a new item's file
+        gets written before its registration completes (possibly in another thread or process).
+        With `dry_run=True`, the orphans are only reported. Takes one directory scan and one DB
+        query in total, so it scales to millions of files."""
+        report = dict(scanned=0, orphans=[], freed_bytes=0, skipped_recent=0, deleted=0)
+
+        # Scan the files before loading the referenced paths, so that all files registered at scan
+        # time are known as referenced. Files registered later are recent and thus skipped.
+        threshold = time.time() - min_age
+        candidates = []  # (path, size) of all files old enough
+        folders = [self.path / kind for kind in KIND2ITEM] + [self.path / "items"]
+        for folder in folders:
+            for entry in _scan_files(folder):
+                report["scanned"] += 1
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue  # Deleted in the meantime
+                if stat.st_mtime > threshold:
+                    report["skipped_recent"] += 1
+                else:
+                    candidates.append((entry.path, stat.st_size))
+
+        # All rows, incl. those flagged as missing (their files may have come back). An item also
+        # uses its default location, as it heals a stale path with it (see Item.validate_file_path).
+        referenced = set()
+        for kind, identifier, path, canonical_id in self._execute(
+                "SELECT kind, id, path, canonical_id FROM items WHERE path IS NOT NULL;"):
+            referenced.add(_normalize_path(self._from_db_path(path)))
+            if canonical_id is None:
+                referenced.add(_normalize_path(self._default_path(kind, identifier, path)))
+        orphans = [(path, size) for path, size in candidates if _normalize_path(path) not in referenced]
+        report["orphans"] = [Path(path).as_posix() for path, _ in orphans]
+        report["freed_bytes"] = sum(size for _, size in orphans)
+        if dry_run:
+            return report
+
+        with progress_bar("Deleting orphans", len(orphans)) as update:
+            for done, (path, size) in enumerate(orphans, start=1):
+                try:
+                    os.remove(path)
+                    report["deleted"] += 1
+                except OSError as e:  # E.g., deleted in the meantime or in use
+                    report["freed_bytes"] -= size
+                    if not isinstance(e, FileNotFoundError):
+                        logger.warning(f"Could not delete orphaned file '{path}': {e}")
+                update(done)
+        return report
 
     # ---------------------------------------------------------------------------------------------
     # Embeddings
@@ -887,12 +1124,20 @@ class ItemRegistry:
         return self._execute(f"SELECT COUNT(*) FROM items WHERE {where};", params)[0][0]
 
     def stats(self) -> dict[str, dict]:
-        """Returns the number of items and the total file size per kind."""
+        """Returns per kind the number of items, their total (stored) file size in bytes, and
+        the number of items with unknown size (see `check_files()` to backfill them)."""
         rows = self._execute("""
-            SELECT kind, COUNT(*), COALESCE(SUM(size), 0) FROM items
+            SELECT kind, COUNT(*), COALESCE(SUM(size), 0), COUNT(*) - COUNT(size) FROM items
             WHERE canonical_id IS NULL GROUP BY kind;
         """)
-        return {kind: dict(count=count, size=size) for kind, count, size in rows}
+        return {kind: dict(count=count, size=size, unknown_size=unknown)
+                for kind, count, size, unknown in rows}
+
+    def total_size(self, kind: str | None = None) -> int:
+        """Returns the total stored file size in bytes of all items (optionally of the given kind),
+        excluding aliases. Fast, as it reads only the DB; items with unknown size count as 0."""
+        where, params = self._filter(kind, None)
+        return self._execute(f"SELECT COALESCE(SUM(size), 0) FROM items WHERE {where};", params)[0][0]
 
     @staticmethod
     def _filter(kind: str | None, query: str | None, include_missing: bool = True) -> tuple[str, tuple]:

@@ -102,7 +102,7 @@ def test_exclude_missing(tmp_path):
     assert item_registry.count_items(include_missing=False) == 2
 
     result = item_registry.check_files()
-    assert result == dict(checked=2, missing=1, changed=1)
+    assert result == dict(checked=2, missing=1, changed=1, sizes_updated=0)
     assert item_registry.get_row("image", missing_img.id)["missing"]
     assert item_registry.count_items() == 2
     assert item_registry.count_items(include_missing=False) == 1
@@ -137,8 +137,65 @@ def test_relocation_clears_missing_flag():
 def test_check_files_clears_flag():
     img = Image("in/roses.jpg")
     item_registry.set_missing("image", img.id, True)
-    assert item_registry.check_files() == dict(checked=1, missing=0, changed=1)
+    assert item_registry.check_files() == dict(checked=1, missing=0, changed=1, sizes_updated=0)
     assert not item_registry.get_row("image", img.id)["missing"]
+
+
+def test_check_files_backfills_sizes(tmp_path):
+    img = Image("in/roses.jpg")
+    missing_img = _make_missing_image(tmp_path)
+    item_registry.conn.execute("UPDATE items SET size = NULL;")
+    assert item_registry.stats()["image"]["unknown_size"] == 2
+
+    assert item_registry.check_files()["sizes_updated"] == 1
+    assert item_registry.get_row("image", img.id)["size"] == Path("in/roses.jpg").stat().st_size
+    assert item_registry.get_row("image", missing_img.id)["size"] is None  # Unknown, as the file is gone
+    assert item_registry.get_row("image", img.id)["sha256"] == img.sha256  # Hash stays valid
+    assert item_registry.stats()["image"]["unknown_size"] == 1
+    assert item_registry.check_files()["sizes_updated"] == 0  # Nothing left to do
+
+
+def test_check_files_refreshes_changed_size(tmp_path):
+    path = tmp_path / "changing.jpg"
+    copyfile("in/roses.jpg", path)
+    img = Image(path)
+    copyfile("in/garden.jpg", path)  # File content changed outside of ezMM
+
+    assert item_registry.check_files()["sizes_updated"] == 1
+    row = item_registry.get_row("image", img.id)
+    assert row["size"] == Path("in/garden.jpg").stat().st_size
+    assert row["sha256"] is None  # Outdated hash got invalidated (gets recomputed by dedup)
+
+
+def test_check_files_keeps_size_of_missing_file(tmp_path):
+    img = _make_missing_image(tmp_path)
+    assert item_registry.check_files()["sizes_updated"] == 0
+    assert item_registry.get_row("image", img.id)["size"] == Path("in/garden.jpg").stat().st_size
+
+
+def test_total_size():
+    from ezmm import Video
+    assert item_registry.total_size() == 0
+    img = Image("in/roses.jpg")
+    vid = Video("in/mountains.mp4")
+    img_size, vid_size = Path("in/roses.jpg").stat().st_size, Path("in/mountains.mp4").stat().st_size
+    assert item_registry.total_size() == img_size + vid_size
+    assert item_registry.total_size("image") == img_size
+    assert item_registry.total_size("video") == vid_size
+    assert item_registry.total_size("audio") == 0
+
+    # Aliases (here: a fake duplicate row) are excluded
+    item_registry.conn.execute("""
+        INSERT INTO items(kind, id, path, size, canonical_id, created_at, updated_at)
+        VALUES ('image', 999, 'alias.jpg', 12345, (SELECT row_id FROM items WHERE kind = 'image' AND id = ?), '', '');
+    """, (img.id,))
+    assert item_registry.total_size("image") == img_size
+
+    # Unknown sizes count as 0 and are reported by stats()
+    item_registry.conn.execute("UPDATE items SET size = NULL WHERE kind = 'video' AND id = ?;", (vid.id,))
+    assert item_registry.total_size() == img_size
+    assert item_registry.stats() == dict(image=dict(count=1, size=img_size, unknown_size=0),
+                                         video=dict(count=1, size=0, unknown_size=1))
 
 
 def test_compute_sha256():
