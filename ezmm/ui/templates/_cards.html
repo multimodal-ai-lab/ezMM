@@ -1,0 +1,6 @@
+{% from "_macros.html" import item_card %}
+<div class="grid" data-next="{{ next_url or '' }}">
+    {% for e in entries %}
+    {{ item_card(e) }}
+    {% endfor %}
+</div>

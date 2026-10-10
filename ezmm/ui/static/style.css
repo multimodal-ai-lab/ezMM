@@ -329,6 +329,7 @@ h1, h2 { letter-spacing: -.02em; margin: 0; }
 .kind-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--kind); flex: none; }
 
 .pagination { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 36px; }
+.loader { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 32px 0 8px; }
 
 .btn {
     display: inline-flex;

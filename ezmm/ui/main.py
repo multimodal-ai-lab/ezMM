@@ -2,9 +2,11 @@
 Start it with `python -m ezmm ui` (requires `pip install ezmm[ui]`)."""
 import logging
 import math
+import secrets
 import socket
 import tempfile
 import threading
+from collections import OrderedDict
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
@@ -69,10 +71,42 @@ def _browse_url(kind: str = "", q: str = "", missing: bool = False, page: int = 
     return "/?" + query if query else "/"
 
 
-def _search_url(q: str = "", kind: str = "", like: str = "") -> str:
+def _search_url(q: str = "", kind: str = "", like: str = "", vec: str = "", page: int = 1) -> str:
     """Returns the URL of the search page with the given query and filter (omitting defaults)."""
-    query = urlencode({key: value for key, value in dict(q=q, kind=kind, like=like).items() if value})
+    params = dict(q=q, kind=kind, like=like, vec=vec, page=page if page > 1 else None)
+    query = urlencode({key: value for key, value in params.items() if value})
     return "/search?" + query if query else "/search"
+
+
+class _QueryCache:
+    """Small, thread-safe LRU cache of query vectors (with their labels). Lets further pages
+    of a search reuse the query vector instead of re-embedding (or re-uploading) the query."""
+
+    def __init__(self, max_size: int = 100):
+        self.max_size = max_size
+        self._entries = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: str):
+        with self._lock:
+            value = self._entries.get(key)
+            if value is not None:
+                self._entries.move_to_end(key)
+            return value
+
+    def put(self, key: str, value):
+        with self._lock:
+            self._entries[key] = value
+            self._entries.move_to_end(key)
+            while len(self._entries) > self.max_size:
+                self._entries.popitem(last=False)
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+
+
+query_cache = _QueryCache()
 
 
 templates.env.filters.update(size=format_size, time_ago=_time_ago, host=_host, duration=_duration)
@@ -94,17 +128,31 @@ def _get_entry(kind: str, identifier: int) -> dict:
     return row
 
 
+def _add_sources(entries: list[dict]):
+    for entry in entries:
+        source_urls = item_registry.get_source_urls(entry["kind"], entry["id"])
+        entry["source_url"] = source_urls[0] if source_urls else None
+        entry["suffix"] = entry["path"].suffix.lstrip(".").upper() if entry["path"] else ""
+
+
+def _render_cards(request: Request, entries: list[dict], next_url: str | None):
+    """Renders only the grid of cards (for endless scrolling), linking to the next page if any."""
+    return templates.TemplateResponse(request, "_cards.html", {"entries": entries, "next_url": next_url})
+
+
 @app.get("/", response_class=HTMLResponse)
-async def browse(request: Request, kind: str = "", q: str = "", page: int = 1, missing: bool = False):
+async def browse(request: Request, kind: str = "", q: str = "", page: int = 1, missing: bool = False,
+                 partial: bool = False):
     """Shows a grid of all items in the registry, filterable by kind and search query.
     Items whose file is missing are hidden unless `missing` is set. Filtering relies on the
-    registry's `missing` flags, which get corrected for all items shown on the page."""
+    registry's `missing` flags, which get corrected for all items shown on the page.
+    With `partial`, returns only the cards of the page (used for endless scrolling)."""
     kind = kind if kind in KINDS else ""
     for _ in range(2):  # Repeat once if the flags of shown items turned out to be outdated
         total_all = item_registry.count_items(kind or None, q or None)
         total = total_all if missing else item_registry.count_items(kind or None, q or None, include_missing=False)
         n_pages = max(math.ceil(total / PAGE_SIZE), 1)
-        page = min(max(page, 1), n_pages)
+        page = max(page, 1) if partial else min(max(page, 1), n_pages)
         entries = item_registry.list_items(kind or None, q or None, offset=(page - 1) * PAGE_SIZE,
                                            limit=PAGE_SIZE, include_missing=missing)
         outdated = False
@@ -117,14 +165,15 @@ async def browse(request: Request, kind: str = "", q: str = "", page: int = 1, m
         if missing or not outdated:
             break
 
-    for entry in entries:
-        source_urls = item_registry.get_source_urls(entry["kind"], entry["id"])
-        entry["source_url"] = source_urls[0] if source_urls else None
-        entry["suffix"] = entry["path"].suffix.lstrip(".").upper() if entry["path"] else ""
+    _add_sources(entries)
+    next_url = _browse_url(kind, q, missing, page + 1) if page < n_pages else None
+    if partial:
+        return _render_cards(request, entries, next_url)
 
     stats = item_registry.stats()
     return templates.TemplateResponse(request, "browse.html", {
         "entries": entries,
+        "next_url": next_url,
         "kind": kind,
         "q": q,
         "page": page,
@@ -228,13 +277,16 @@ class _Indexer:
 indexer = _Indexer()
 
 
-def _render_search(request: Request, kind: str = "", q: str = "", like: str = "",
-                   query_vector=None, query_label: str = "", error: str | None = None):
-    from ezmm.embedding import INSTALL_HINT, MODEL_NAME, embed_query, is_available
+def _render_search(request: Request, kind: str = "", q: str = "", like: str = "", vec: str = "",
+                   page: int = 1, partial: bool = False, error: str | None = None):
+    """Renders the search page (or, with `partial`, only the result cards) for a text query (`q`),
+    an existing item (`like`), or a query vector cached under the token `vec` (uploaded files)."""
+    from ezmm.embedding import INSTALL_HINT, MODEL_NAME, embed_query, get_embedding_dim, is_available
     kind = kind if kind in KINDS else ""
-    results, exclude = [], None
+    page = max(page, 1)
+    results, exclude, query_vector, query_label, next_url = [], None, None, "", None
     if not is_available():
-        q, like, query_vector, error = "", "", None, INSTALL_HINT
+        q, like, vec, error = "", "", "", INSTALL_HINT
     try:
         if like:
             exclude = parse_ref(f"<{like}>")
@@ -243,25 +295,39 @@ def _render_search(request: Request, kind: str = "", q: str = "", like: str = ""
                 raise HTTPException(404, f"Item <{like}> does not exist.")
             query_vector, query_label = item.embedding, item.reference
         elif q:
-            query_vector, query_label = embed_query(q), f"“{q}”"
+            key = f"q:{get_embedding_dim()}:{q}"
+            if (cached := query_cache.get(key)) is None:
+                cached = embed_query(q), f"“{q}”"
+                query_cache.put(key, cached)
+            query_vector, query_label = cached
+        elif vec:
+            if (cached := query_cache.get(f"vec:{vec}")) is None:
+                error = "This search has expired. Please search with the file again."
+            else:
+                query_vector, query_label = cached
         if query_vector is not None:
-            results = item_registry.search(query_vector, MODEL_NAME, kind=kind or None,
-                                           limit=PAGE_SIZE, exclude=exclude)
+            results = item_registry.search(query_vector, MODEL_NAME, kind=kind or None, limit=PAGE_SIZE + 1,
+                                           offset=(page - 1) * PAGE_SIZE, exclude=exclude)
+            if len(results) > PAGE_SIZE:
+                results = results[:PAGE_SIZE]
+                next_url = _search_url(q, kind, like, vec, page + 1)
     except HTTPException:
         raise
     except Exception as e:
         error = str(e)
         logger.warning(f"Search failed: {e}")
 
-    for entry in results:
-        source_urls = item_registry.get_source_urls(entry["kind"], entry["id"])
-        entry["source_url"] = source_urls[0] if source_urls else None
-        entry["suffix"] = entry["path"].suffix.lstrip(".").upper() if entry["path"] else ""
+    _add_sources(results)
+    if partial:
+        return _render_cards(request, results, next_url)
     return templates.TemplateResponse(request, "search.html", {
-        "results": results,
+        "entries": results,
+        "next_url": next_url,
+        "page": page,
         "kind": kind,
         "q": q,
         "like": like,
+        "vec": vec,
         "query_label": query_label,
         "searched": query_vector is not None,
         "error": error,
@@ -272,16 +338,21 @@ def _render_search(request: Request, kind: str = "", q: str = "", like: str = ""
 
 
 @app.get("/search", response_class=HTMLResponse)
-async def search(request: Request, q: str = "", kind: str = "", like: str = ""):
+async def search(request: Request, q: str = "", kind: str = "", like: str = "", vec: str = "",
+                 page: int = 1, partial: bool = False):
     """Semantic search over all items with a text query (`q`) or by an existing item (`like`,
-    e.g., `image:3`). Only items that are embedded already are searched."""
-    return await run_in_threadpool(_render_search, request, kind=kind, q=q.strip(), like=like)
+    e.g., `image:3`). Only items that are embedded already are searched. Further pages of
+    a search with an uploaded file reference its cached query vector by the token `vec`.
+    With `partial`, returns only the result cards of the page (used for endless scrolling)."""
+    return await run_in_threadpool(_render_search, request, kind=kind, q=q.strip(), like=like, vec=vec,
+                                   page=page, partial=partial)
 
 
 @app.post("/search", response_class=HTMLResponse)
 async def search_by_file(request: Request, file: UploadFile, kind: str = Form("")):
     """Semantic search over all items with an uploaded file of any kind as the query.
-    The file is embedded on the fly and not added to the registry."""
+    The file is embedded on the fly and not added to the registry. Its embedding is
+    cached briefly (in memory) so that further pages of the results can be loaded."""
     from ezmm.embedding import embed_file, is_available, kind_of_file
     data = await file.read()
     if not is_available():
@@ -296,17 +367,18 @@ async def search_by_file(request: Request, file: UploadFile, kind: str = Form(""
             vector = await run_in_threadpool(embed_file, path, kind_of_file(path, file.content_type))
         except Exception as e:
             return _render_search(request, kind=kind, error=f"Could not embed the uploaded file: {e}")
-    return await run_in_threadpool(_render_search, request, kind=kind, query_vector=vector,
-                                   query_label=file.filename or "uploaded file")
+    token = secrets.token_urlsafe(9)
+    query_cache.put(f"vec:{token}", (vector, file.filename or "uploaded file"))
+    return await run_in_threadpool(_render_search, request, kind=kind, vec=token)
 
 
 @app.post("/search/index")
-async def index_items(kind: str = Form(""), q: str = Form(""), like: str = Form("")):
+async def index_items(kind: str = Form(""), q: str = Form(""), like: str = Form(""), vec: str = Form("")):
     """Starts embedding all not yet embedded items in the background."""
     from ezmm.embedding import is_available
     if is_available():
         indexer.start()
-    return RedirectResponse(_search_url(q, kind, like), status_code=303)
+    return RedirectResponse(_search_url(q, kind, like, vec), status_code=303)
 
 
 @app.get("/sequences", response_class=HTMLResponse)

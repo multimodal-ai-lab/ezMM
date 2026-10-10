@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import kind_icon, item_card %}
+{% from "_macros.html" import kind_icon %}
 {% set nav = "search" %}
 {% block title %}Search · ezMM{% endblock %}
 {% block head %}{% if indexer.running %}<meta http-equiv="refresh" content="3">{% endif %}{% endblock %}
@@ -40,7 +40,7 @@
     {{ n_indexed }} item{{ 's' if n_indexed != 1 }} searchable.
     {% if n_unindexed %}
     <form action="/search/index" method="post" class="inline-form">
-        <input type="hidden" name="q" value="{{ q }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="like" value="{{ like }}">
+        <input type="hidden" name="q" value="{{ q }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="like" value="{{ like }}"><input type="hidden" name="vec" value="{{ vec }}">
         {{ n_unindexed }} item{{ 's are' if n_unindexed != 1 else ' is' }} not indexed yet.
         <button class="link-btn" type="submit">Index now</button>
     </form>
@@ -53,23 +53,27 @@
 
 {% if searched %}
 <div class="toolbar">
-    {% if q or like %}
+    {% if q or like or vec %}
     <nav class="segmented" aria-label="Filter by kind">
-        <a href="{{ search_url(q, '', like) }}" class="{{ 'active' if not kind }}">All</a>
+        <a href="{{ search_url(q, '', like, vec) }}" class="{{ 'active' if not kind }}">All</a>
         {% for k in kinds %}
-        <a href="{{ search_url(q, k, like) }}" class="{{ 'active' if kind == k }}">{{ k | capitalize }}s</a>
+        <a href="{{ search_url(q, k, like, vec) }}" class="{{ 'active' if kind == k }}">{{ k | capitalize }}s</a>
         {% endfor %}
     </nav>
     {% endif %}
     <span class="muted small">Most similar items to <strong>{{ query_label }}</strong></span>
 </div>
 
-{% if results %}
-<div class="grid">
-    {% for e in results %}
-    {{ item_card(e) }}
-    {% endfor %}
-</div>
+{% if entries %}
+{% include "_cards.html" %}
+
+{% if page > 1 or next_url %}
+<nav class="pagination" aria-label="Pagination">
+    <a class="btn {{ 'disabled' if page <= 1 }}" href="{{ search_url(q, kind, like, vec, page - 1) }}">← Previous</a>
+    <span class="muted small">Page {{ page }}</span>
+    <a class="btn {{ 'disabled' if not next_url }}" href="{{ next_url or '#' }}">More results →</a>
+</nav>
+{% endif %}
 {% else %}
 <div class="empty">
     <div class="empty-icon">{{ kind_icon(kind or 'file') }}</div>

@@ -1,10 +1,13 @@
+import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from ezmm import Audio, File, Image, MultimodalSequence, Video, embedding
 from ezmm.common import item_registry
+from ezmm.ui import main as ui_main
 from ezmm.ui.common import get_seq_path
 from ezmm.ui.main import app
 
@@ -202,6 +205,184 @@ def test_audio_only_video_page(client, audio_only_video):
     assert "Audio only (no video stream)" in response.text
     assert "0 × 0" not in response.text and "Frame rate" not in response.text
     assert "<audio" in response.text and "<video" not in response.text
+
+
+def _card_refs(html: str) -> list[str]:
+    """Returns the item links of all cards in the order they appear."""
+    return re.findall(r'<a class="card kind-\w+" href="/item/(\w+/\d+)"', html)
+
+
+def test_browse_partial_pages(client, monkeypatch):
+    monkeypatch.setattr(ui_main, "PAGE_SIZE", 2)
+    for path in ["in/roses.jpg", "in/garden.jpg", "in/tulips.jpg"]:
+        Image(path)
+    Video("in/snow.mp4")
+    image_refs = ["image/3", "image/2", "image/1"]  # Newest first
+
+    response = client.get("/")
+    page1 = _card_refs(response.text)
+    assert len(page1) == 2
+    assert 'data-next="/?page=2"' in response.text
+    assert "Page 1 of 2" in response.text  # Pagination links stay as fallback without JS
+    assert "4 items" in response.text  # The total, not the number of shown items
+
+    response = client.get("/?page=2&partial=1")
+    assert response.status_code == 200
+    assert "<html" not in response.text and "toolbar" not in response.text
+    page2 = _card_refs(response.text)
+    assert sorted(page1 + page2) == ["image/1", "image/2", "image/3", "video/1"]  # No overlaps, no gaps
+    assert 'data-next=""' in response.text  # No more pages
+    assert _card_refs(client.get("/?page=3&partial=1").text) == []  # Beyond the end: empty, no repetition
+
+    # Filters are respected and carried over to the next page
+    response = client.get("/?kind=image&partial=1")
+    assert _card_refs(response.text) == image_refs[:2]
+    assert 'data-next="/?kind=image&amp;page=2"' in response.text
+    assert _card_refs(client.get("/?kind=image&page=2&partial=1").text) == image_refs[2:]
+    response = client.get("/?q=snow&partial=1")
+    assert _card_refs(response.text) == ["video/1"] and 'data-next=""' in response.text
+
+
+def test_browse_partial_missing(client, monkeypatch, tmp_path):
+    from shutil import copyfile
+    monkeypatch.setattr(ui_main, "PAGE_SIZE", 1)
+    gone = tmp_path / "gone.jpg"
+    copyfile("in/garden.jpg", gone)
+    img = Image("in/roses.jpg")
+    missing_img = Image(gone)
+    gone.unlink()
+    item_registry.set_missing("image", missing_img.id, True)
+    response = client.get("/?partial=1")
+    assert _card_refs(response.text) == [f"image/{img.id}"] and 'data-next=""' in response.text
+    response = client.get("/?missing=1&partial=1")
+    assert _card_refs(response.text) == [f"image/{missing_img.id}"]
+    assert 'data-next="/?missing=1&amp;page=2"' in response.text
+    assert _card_refs(client.get("/?missing=1&page=2&partial=1").text) == [f"image/{img.id}"]
+
+
+def _random_embeddings(items, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    vectors = embedding.truncate(rng.standard_normal((len(items), embedding.MODEL_DIM)), embedding.MODEL_DIM)
+    item_registry.set_embeddings(embedding.MODEL_NAME, [(item.kind, item.id, v) for item, v in zip(items, vectors)])
+    return vectors
+
+
+def test_registry_search_offset(tmp_path):
+    files = []
+    for i in range(20):
+        path = tmp_path / f"file{i}.txt"
+        path.write_text(f"File number {i}")
+        files.append(File(path))
+    _random_embeddings(files)
+    query = embedding.truncate(np.random.default_rng(1).standard_normal(embedding.MODEL_DIM), 256)
+
+    def refs(**kwargs):
+        return [row["reference"] for row in item_registry.search(query, embedding.MODEL_NAME, device="cpu", **kwargs)]
+
+    full = refs(limit=100)
+    assert len(full) == 20
+    pages = [refs(offset=offset, limit=6) for offset in range(0, 24, 6)]
+    assert [len(page) for page in pages] == [6, 6, 6, 2]
+    assert [ref for page in pages for ref in page] == full  # No overlaps, no gaps
+    assert refs(offset=20, limit=6) == []
+    # Excluded and missing items are skipped consistently across pages
+    excluded = (files[0].kind, files[0].id)
+    item_registry.set_missing(files[1].kind, files[1].id, True)
+    filtered = refs(limit=100, exclude=excluded)
+    assert len(filtered) == 18
+    pages = [refs(offset=offset, limit=5, exclude=excluded) for offset in range(0, 20, 5)]
+    assert [ref for page in pages for ref in page] == filtered
+    assert refs(limit=3, kind="image") == []
+
+
+@pytest.fixture
+def fake_embed(monkeypatch):
+    """Lets the search UI run without the embedding model: queries embed to a fixed vector."""
+    vector = embedding.truncate(np.random.default_rng(1).standard_normal(embedding.MODEL_DIM), 256)
+    calls = []
+
+    def embed_query(query, dim=None):
+        calls.append(query)
+        return vector
+
+    monkeypatch.setattr(embedding, "is_available", lambda: True)
+    monkeypatch.setattr(embedding, "get_index_device", lambda: "cpu")
+    monkeypatch.setattr(embedding, "embed_query", embed_query)
+    monkeypatch.setattr(embedding, "embed_file", lambda path, kind=None, dim=None: vector)
+    monkeypatch.setattr(ui_main, "PAGE_SIZE", 2)
+    ui_main.query_cache.clear()
+    yield calls
+    ui_main.query_cache.clear()
+
+
+def _expected_refs(query=None, exclude=None):
+    """Returns the item links of all search results (default: for the fake query vector), best first."""
+    if query is None:
+        query = embedding.truncate(np.random.default_rng(1).standard_normal(embedding.MODEL_DIM), 256)
+    rows = item_registry.search(query, embedding.MODEL_NAME, limit=100, exclude=exclude, device="cpu")
+    return [f"{row['kind']}/{row['id']}" for row in rows]
+
+
+def test_search_partial_pages(client, fake_embed):
+    items = [Image(p) for p in ["in/roses.jpg", "in/garden.jpg", "in/tulips.jpg"]] + [Video("in/snow.mp4")]
+    _random_embeddings(items)
+    expected = _expected_refs()
+
+    response = client.get("/search?q=fake+query")
+    assert response.status_code == 200
+    assert _card_refs(response.text) == expected[:2]
+    assert 'data-next="/search?q=fake+query&amp;page=2"' in response.text
+    assert "More results" in response.text  # Fallback link without JS
+
+    response = client.get("/search?q=fake+query&page=2&partial=1")
+    assert "<html" not in response.text
+    assert _card_refs(response.text) == expected[2:]
+    assert 'data-next=""' in response.text
+    assert fake_embed == ["fake query"]  # The query vector got cached instead of re-embedded
+
+    image_refs = [ref for ref in expected if ref.startswith("image/")]
+    response = client.get("/search?q=fake+query&kind=image&partial=1")
+    assert _card_refs(response.text) == image_refs[:2]
+    assert 'data-next="/search?q=fake+query&amp;kind=image&amp;page=2"' in response.text
+
+    like = items[0]
+    expected_like = _expected_refs(like.embedding, exclude=(like.kind, like.id))
+    assert len(expected_like) == 3
+    pages = [_card_refs(client.get(f"/search?like=image:{like.id}&page={page}&partial=1").text) for page in (1, 2)]
+    assert [ref for page in pages for ref in page] == expected_like
+
+
+def test_search_by_file_pages(client, fake_embed):
+    items = [Image(p) for p in ["in/roses.jpg", "in/garden.jpg", "in/tulips.jpg"]]
+    _random_embeddings(items)
+    expected = _expected_refs()
+    with open("in/roses_smaller.jpg", "rb") as f:
+        response = client.post("/search", files={"file": ("roses_smaller.jpg", f)})
+    assert response.status_code == 200
+    assert "roses_smaller.jpg" in response.text
+    assert _card_refs(response.text) == expected[:2]
+    next_url = re.search(r'data-next="(/search\?vec=[\w-]+&amp;page=2)"', response.text).group(1).replace("&amp;", "&")
+    assert item_registry.count_items() == 3  # The query file does not get added to the registry
+
+    response = client.get(next_url + "&partial=1")
+    assert _card_refs(response.text) == expected[2:] and 'data-next=""' in response.text
+    response = client.get(next_url)  # Full page without JS
+    assert "roses_smaller.jpg" in response.text and _card_refs(response.text) == expected[2:]
+
+    ui_main.query_cache.clear()  # E.g., after a server restart
+    response = client.get(next_url)
+    assert response.status_code == 200
+    assert "This search has expired" in response.text
+    assert _card_refs(client.get(next_url + "&partial=1").text) == []
+
+
+def test_query_cache_is_bounded():
+    cache = ui_main._QueryCache(max_size=2)
+    cache.put("a", 1)
+    cache.put("b", 2)
+    assert cache.get("a") == 1  # Marks "a" as recently used
+    cache.put("c", 3)
+    assert cache.get("b") is None and cache.get("a") == 1 and cache.get("c") == 3
 
 
 def test_duration_format():
