@@ -619,6 +619,17 @@ class ItemRegistry:
         item. If the URL pointed to another item before (i.e., the content behind the URL
         changed), it now points to the given item. Returns True iff the source is new for
         this item. Must be called within a transaction."""
+        # TODO: Keep the history of sources (schema v4). Today, each URL points to exactly one item
+        #  (`sources.url` is UNIQUE), so when the content behind a URL changes (e.g., a web page updates
+        #  its media), the previous item loses the URL and possibly all of its provenance. The v1 -> v3
+        #  migration lost URLs the same way when several legacy rows shared one URL (the original URLs
+        #  are still in the `item_registry.v1.bak.db` backups). Plan:
+        #  - Let a URL point to several items: UNIQUE(url, item_row_id) instead of UNIQUE(url), and keep
+        #    `created_at` (first seen) and `last_accessed` (last seen) per link.
+        #  - `get_by_source_url()` returns the most recently delivered item; `get_sources()` lists all
+        #    URLs that ever delivered an item.
+        #  - Migration to v4 restores lost URLs from the v1 backups where available.
+        #  - Older ezMM versions cannot read v4 registries (needs a schema version bump and a backup).
         if not url:
             return False
         now = _now()
