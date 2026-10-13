@@ -50,7 +50,7 @@ MAX_FRAME_PIXELS = 640 * 640  # Larger video frames get downscaled (the model us
 N_WORKERS = min(16, (os.cpu_count() or 1) + 4)
 CHUNK_SIZE = 64
 BATCH_SIZES = {"text": 64, "image": 16, "audio": 8, "video": 2}
-SEQUENCE_CHUNK_SIZE = 1024  # Sequences whose texts get embedded in one model call (sorted by length)
+SEQUENCE_CHUNK_SIZE = 1024  # Sequences whose texts get embedded in one model call
 
 # Text prompts (task instructions) the model was trained with
 QUERY_PROMPT = "SearchQuery"
@@ -350,9 +350,15 @@ def embed_sequences(sequences: Iterable["MultimodalSequence | str"], dim: int | 
     from the item registry; items that are not embedded yet get embedded one by one, so embed
     them in bulk beforehand (see `embed_registry()`). Shows a progress bar. Returns one embedding
     per sequence, in order, or the exception that occurred for that sequence (e.g., a ValueError
-    for an empty sequence or the error of an item that cannot be embedded)."""
+    for an empty sequence or the error of an item that cannot be embedded). Items that cannot
+    be embedded are tried only once per call."""
+    from ezmm.common.multimodal_sequence import MultimodalSequence
+    if isinstance(sequences, (str, MultimodalSequence)):
+        raise TypeError("embed_sequences() expects an iterable of sequences. Use `seq.embedding` "
+                        "to embed a single sequence.")
     sequences = list(sequences)
     dim = dim or _embedding_dim
+    item_errors = {}  # (kind, id) -> error of each item that cannot be embedded
     results = []
     with progress_bar("Embedding", len(sequences), unit="sequence") as update:
         for start in range(0, len(sequences), chunk_size):
@@ -360,7 +366,8 @@ def embed_sequences(sequences: Iterable["MultimodalSequence | str"], dim: int | 
             texts = list(dict.fromkeys(seq.text for seq in chunk
                                        if not isinstance(seq, Exception) and seq.text.strip()))
             text_embeddings = dict(zip(texts, _embed_texts(texts, dim)))
-            results.extend(seq if isinstance(seq, Exception) else _combine_or_error(seq, text_embeddings, dim)
+            results.extend(seq if isinstance(seq, Exception)
+                           else _combine_or_error(seq, text_embeddings, dim, item_errors)
                            for seq in chunk)
             update(len(results))
     return results
@@ -393,17 +400,40 @@ def _embed_texts(texts: list[str], dim: int) -> list[np.ndarray | Exception]:
 
 
 def _combine_or_error(sequence: "MultimodalSequence", text_embeddings: dict[str, np.ndarray | Exception],
-                      dim: int) -> np.ndarray | Exception:
+                      dim: int, item_errors: dict[tuple[str, int], Exception]) -> np.ndarray | Exception:
     def embed_text_from_batch(text: str) -> np.ndarray:
         result = text_embeddings[text]
         if isinstance(result, Exception):
             raise result
         return result
 
+    error = _first_item_error(sequence, item_errors)
+    if error is not None:
+        return error
     try:
         return sequence._combine_embeddings(embed_text_from_batch, dim)
     except Exception as e:
         return e
+
+
+def _first_item_error(sequence: "MultimodalSequence",
+                      item_errors: dict[tuple[str, int], Exception]) -> Exception | None:
+    """Loads (or computes) the embeddings of the sequence's items, which stay cached on the items,
+    and returns the error of the first item that cannot be embedded, if any. Failing items are
+    recorded in `item_errors`, so that each one gets tried only once."""
+    from ezmm.common.items.item import Item
+    for item in sequence.data:
+        if not isinstance(item, Item):
+            continue
+        key = (item.kind, item.id)
+        if key not in item_errors:
+            try:
+                item._get_full_embedding()
+            except Exception as e:
+                item_errors[key] = e
+        if key in item_errors:
+            return item_errors[key]
+    return None
 
 
 # -------------------------------------------------------------------------------------------------

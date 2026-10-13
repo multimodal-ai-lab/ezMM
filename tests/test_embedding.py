@@ -415,6 +415,26 @@ def test_embed_sequences_isolates_failures(fake_model, embedded_images, tmp_path
     assert embed_sequences([]) == []
 
 
+def test_embed_sequences_tries_failing_items_once(fake_model, monkeypatch, tmp_path):
+    gone = tmp_path / "gone.bin"
+    gone.write_bytes(np.random.default_rng(0).bytes(1024))
+    missing = File(gone)
+    gone.unlink()
+    attempts = []
+    compute = File._compute_embedding
+    monkeypatch.setattr(File, "_compute_embedding", lambda self: attempts.append(self) or compute(self))
+
+    results = embed_sequences([MultimodalSequence(f"Text {i}.", missing) for i in range(10)], chunk_size=4)
+    assert all(isinstance(result, FileNotFoundError) for result in results)
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("single", ["Just one text.", MultimodalSequence("Just one text.")])
+def test_embed_sequences_rejects_single_sequence(fake_model, single):
+    with pytest.raises(TypeError, match="iterable of sequences"):
+        embed_sequences(single)
+
+
 def test_embed_sequences_dim(fake_model, embedded_images):
     roses = embedded_images[0]
     seq = MultimodalSequence("The image", roses, "shows roses.")
