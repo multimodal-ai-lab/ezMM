@@ -176,7 +176,13 @@ class Item(ABC):
         """Returns the (normalized) embedding of the item, computed with EmbeddingGemma 2, in the
         configured dimension (see `ezmm.embedding.set_embedding_dim()`). The full embeddings are
         stored in the item registry, so each item is embedded only once."""
-        from ezmm.embedding import MODEL_NAME, get_embedding_dim, truncate
+        from ezmm.embedding import get_embedding_dim, truncate
+        return truncate(self._get_full_embedding(), get_embedding_dim())
+
+    def _get_full_embedding(self) -> np.ndarray:
+        """Returns the full (native-dimension) embedding of the item, loaded from the item
+        registry or, if not embedded yet, computed and stored there."""
+        from ezmm.embedding import MODEL_NAME
         if self._embedding is None:
             from ezmm.common.registry import item_registry
             embedding = item_registry.get_embedding(self.kind, self.id, MODEL_NAME)
@@ -184,7 +190,7 @@ class Item(ABC):
                 embedding = self._compute_embedding()
                 item_registry.set_embedding(self.kind, self.id, MODEL_NAME, embedding)
             self._embedding = embedding
-        return truncate(self._embedding, get_embedding_dim())
+        return self._embedding
 
     def _compute_embedding(self) -> np.ndarray:
         """Computes the full embedding of the item's file."""

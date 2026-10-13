@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Self
 
 import numpy as np
@@ -134,11 +134,21 @@ class MultimodalSequence:
     def embedding(self) -> np.ndarray:
         """Returns the (normalized) embedding of the sequence: the average of the embedding
         of the sequence's full text and the embeddings of its (unique) items."""
-        from ezmm.embedding import embed_text, normalize
+        from ezmm.embedding import embed_text
+        return self._combine_embeddings(embed_text)
+
+    def _combine_embeddings(self, embed_text: Callable[[str], np.ndarray], dim: int | None = None) -> np.ndarray:
+        """Returns the normalized average of the embeddings of the sequence's (unique) items,
+        truncated to `dim` (default: the configured dimension), and the embedding of its full
+        text, given by `embed_text(text)` in the same dimension. Shared by `embedding` and
+        `ezmm.embedding.embed_sequences()`, which embeds the texts of many sequences in batches."""
+        from ezmm.embedding import get_embedding_dim, normalize, truncate
+        dim = dim or get_embedding_dim()
         items = list(dict.fromkeys(el for el in self.data if isinstance(el, Item)))
-        embeddings = [item.embedding for item in items]
-        if self.text.strip():
-            embeddings.append(embed_text(self.text))
+        embeddings = [truncate(item._get_full_embedding(), dim) for item in items]
+        text = self.text
+        if text.strip():
+            embeddings.append(embed_text(text))
         if not embeddings:
             raise ValueError("Cannot embed an empty MultimodalSequence.")
         return normalize(np.mean(embeddings, axis=0))
