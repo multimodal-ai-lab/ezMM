@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import imageio_ffmpeg
 import numpy as np
@@ -22,6 +23,9 @@ from PIL.Image import Image as PillowImage
 
 from ezmm.common.vector_index import truncate
 from ezmm.util import progress_bar
+
+if TYPE_CHECKING:
+    from ezmm.common.multimodal_sequence import MultimodalSequence
 
 logger = logging.getLogger("ezMM")
 
@@ -46,6 +50,7 @@ MAX_FRAME_PIXELS = 640 * 640  # Larger video frames get downscaled (the model us
 N_WORKERS = min(16, (os.cpu_count() or 1) + 4)
 CHUNK_SIZE = 64
 BATCH_SIZES = {"text": 64, "image": 16, "audio": 8, "video": 2}
+SEQUENCE_CHUNK_SIZE = 1024  # Sequences whose texts get embedded in one model call (sorted by length)
 
 # Text prompts (task instructions) the model was trained with
 QUERY_PROMPT = "SearchQuery"
@@ -331,6 +336,74 @@ def embed_registry(kind: str | None = None, n_workers: int = N_WORKERS, chunk_si
                 if on_progress:
                     on_progress(done, len(todo), failed)
     return dict(embedded=done - failed, failed=failed)
+
+
+# -------------------------------------------------------------------------------------------------
+# Sequences
+
+def embed_sequences(sequences: Iterable["MultimodalSequence | str"], dim: int | None = None,
+                    chunk_size: int = SEQUENCE_CHUNK_SIZE) -> list[np.ndarray | Exception]:
+    """Embeds the sequences (strings are turned into sequences) exactly like `seq.embedding`
+    (the normalized average of the embeddings of the full text and of the unique items), but
+    efficiently: the texts of each chunk of sequences get embedded together, in batches, instead
+    of one model call per sequence. Identical texts get embedded only once. Item embeddings come
+    from the item registry; items that are not embedded yet get embedded one by one, so embed
+    them in bulk beforehand (see `embed_registry()`). Shows a progress bar. Returns one embedding
+    per sequence, in order, or the exception that occurred for that sequence (e.g., a ValueError
+    for an empty sequence or the error of an item that cannot be embedded)."""
+    sequences = list(sequences)
+    dim = dim or _embedding_dim
+    results = []
+    with progress_bar("Embedding", len(sequences), unit="sequence") as update:
+        for start in range(0, len(sequences), chunk_size):
+            chunk = [_as_sequence_or_error(seq) for seq in sequences[start:start + chunk_size]]
+            texts = list(dict.fromkeys(seq.text for seq in chunk
+                                       if not isinstance(seq, Exception) and seq.text.strip()))
+            text_embeddings = dict(zip(texts, _embed_texts(texts, dim)))
+            results.extend(seq if isinstance(seq, Exception) else _combine_or_error(seq, text_embeddings, dim)
+                           for seq in chunk)
+            update(len(results))
+    return results
+
+
+def _as_sequence_or_error(sequence: "MultimodalSequence | str") -> "MultimodalSequence | Exception":
+    from ezmm.common.multimodal_sequence import MultimodalSequence
+    try:
+        return sequence if isinstance(sequence, MultimodalSequence) else MultimodalSequence(sequence)
+    except Exception as e:
+        return e
+
+
+def _embed_texts(texts: list[str], dim: int) -> list[np.ndarray | Exception]:
+    """Embeds the texts as documents in batches. Isolates failing texts by embedding them one
+    by one if a batch fails."""
+    if not texts:
+        return []
+    get_model()  # Raises an ImportError for all texts if ezmm[embed] is missing
+    try:
+        return list(truncate(_encode(texts, DOCUMENT_PROMPT, batch_size=BATCH_SIZES["text"]), dim))
+    except Exception:
+        results = []
+        for text in texts:
+            try:
+                results.append(truncate(_encode([text], DOCUMENT_PROMPT)[0], dim))
+            except Exception as e:
+                results.append(e)
+        return results
+
+
+def _combine_or_error(sequence: "MultimodalSequence", text_embeddings: dict[str, np.ndarray | Exception],
+                      dim: int) -> np.ndarray | Exception:
+    def embed_text_from_batch(text: str) -> np.ndarray:
+        result = text_embeddings[text]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    try:
+        return sequence._combine_embeddings(embed_text_from_batch, dim)
+    except Exception as e:
+        return e
 
 
 # -------------------------------------------------------------------------------------------------

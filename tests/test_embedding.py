@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 
 import numpy as np
@@ -6,7 +7,8 @@ import pytest
 from ezmm import Audio, File, Image, MultimodalSequence, Video, embedding
 from ezmm.common import item_registry
 from ezmm.common.registry import SCHEMA, SCHEMA_VERSION
-from ezmm.embedding import DEFAULT_DIM, MODEL_DIM, MODEL_NAME, embed_file, embed_query, embed_text, truncate
+from ezmm.embedding import (DEFAULT_DIM, MODEL_DIM, MODEL_NAME, embed_file, embed_query, embed_sequences, embed_text,
+                            truncate)
 
 requires_embed = pytest.mark.skipif(not embedding.is_available(), reason="Requires ezmm[embed]")
 
@@ -321,3 +323,126 @@ def test_audio_only_video_embedding(audio_only_video):
     vid = Video(audio_only_video)
     assert vid.embedding.shape == (DEFAULT_DIM,)
     assert vid.cos_sim(Audio("in/tone.wav")) > 0.95
+
+
+# -------------------------------------------------------------------------------------------------
+# Batch embedding of sequences (with a fake model, so these tests run without ezmm[embed])
+
+class FakeModel:
+    """Embeds each text deterministically into a random (normalized) vector, recording the model calls.
+    Fails for inputs containing 'FAIL'."""
+
+    def __init__(self):
+        self.calls = []
+
+    def encode(self, inputs, prompt_name=None, **kwargs):
+        self.calls.append((list(inputs), prompt_name))
+        if any("FAIL" in text for text in inputs):
+            raise RuntimeError("Cannot embed this text.")
+        seeds = [int.from_bytes(hashlib.sha256(f"{prompt_name}|{text}".encode()).digest()[:8], "little")
+                 for text in inputs]
+        return truncate(np.stack([np.random.default_rng(seed).standard_normal(MODEL_DIM) for seed in seeds]), MODEL_DIM)
+
+
+@pytest.fixture
+def fake_model(monkeypatch):
+    model = FakeModel()
+    monkeypatch.setattr(embedding, "_model", model)
+    monkeypatch.setattr(embedding, "_embedding_dim", DEFAULT_DIM)  # Restored after the test
+    return model
+
+
+@pytest.fixture
+def embedded_images():
+    """Images with (random) embeddings stored in the registry."""
+    images = [Image(p) for p in ["in/roses.jpg", "in/garden.jpg", "in/tulips.jpg"]]
+    _random_embeddings(images)
+    return images
+
+
+def _sequences(images):
+    roses, garden, tulips = images
+    return [MultimodalSequence("The image", roses, "shows roses."),
+            MultimodalSequence(garden, tulips, garden),
+            MultimodalSequence("Just text."),
+            "A plain string.",
+            MultimodalSequence("The image", roses, "shows roses."),  # Duplicate text
+            MultimodalSequence(tulips, "Tulips in", garden, "a garden.")]
+
+
+def test_embed_sequences_matches_sequence_embedding(fake_model, embedded_images):
+    sequences = _sequences(embedded_images)
+    results = embed_sequences(sequences)
+    assert len(results) == len(sequences)
+    for seq, result in zip(sequences, results):
+        seq = seq if isinstance(seq, MultimodalSequence) else MultimodalSequence(seq)
+        assert result.shape == (DEFAULT_DIM,) and result.dtype == np.float32
+        assert np.allclose(result, seq.embedding, atol=1e-6)
+    # The texts are embedded as documents
+    assert {prompt for _, prompt in fake_model.calls} == {embedding.DOCUMENT_PROMPT}
+
+
+def test_embed_sequences_batches_texts(fake_model):
+    sequences = [f"Claim number {i}." for i in range(100)] + ["Claim number 0."]
+    results = embed_sequences(sequences)
+    assert len(results) == 101
+    assert len(fake_model.calls) == 1  # All (unique) texts in one model call
+    assert len(fake_model.calls[0][0]) == 100
+    assert np.allclose(results[0], results[100])
+
+    fake_model.calls.clear()
+    assert all(np.allclose(a, b) for a, b in zip(embed_sequences(sequences, chunk_size=40), results))
+    assert len(fake_model.calls) == 3
+
+
+def test_embed_sequences_isolates_failures(fake_model, embedded_images, tmp_path):
+    gone = tmp_path / "gone.bin"
+    gone.write_bytes(np.random.default_rng(0).bytes(1024))
+    missing = File(gone)  # Not embedded yet and its file is gone
+    gone.unlink()
+
+    sequences = [MultimodalSequence("Fine.", embedded_images[0]), MultimodalSequence(), "   ",
+                 MultimodalSequence("This one will FAIL."), MultimodalSequence("Also fine.", missing),
+                 "Fine, too."]
+    results = embed_sequences(sequences)
+    assert len(results) == len(sequences)
+    assert isinstance(results[1], ValueError)  # Empty sequences
+    assert isinstance(results[2], ValueError)
+    assert isinstance(results[3], RuntimeError)  # The failing text
+    assert isinstance(results[4], Exception)  # The item that cannot be embedded
+    assert np.allclose(results[0], sequences[0].embedding, atol=1e-6)
+    assert np.allclose(results[5], MultimodalSequence("Fine, too.").embedding, atol=1e-6)
+    assert embed_sequences([]) == []
+
+
+def test_embed_sequences_dim(fake_model, embedded_images):
+    roses = embedded_images[0]
+    seq = MultimodalSequence("The image", roses, "shows roses.")
+    for dim in (128, 768):
+        result = embed_sequences([seq], dim=dim)[0]
+        assert result.shape == (dim,)
+        # Item and text embeddings are averaged in the requested dimension
+        expected = np.mean([truncate(roses._get_full_embedding(), dim), embed_text(seq.text, dim=dim)], axis=0)
+        assert np.allclose(result, expected / np.linalg.norm(expected), atol=1e-6)
+
+    embedding.set_embedding_dim(512)  # The configured dimension is the default
+    assert np.allclose(embed_sequences([seq])[0], seq.embedding, atol=1e-6)
+    assert seq.embedding.shape == (512,)
+
+
+def test_embed_sequences_without_embed_extra(monkeypatch, embedded_images):
+    monkeypatch.setattr(embedding, "is_available", lambda: False)
+    monkeypatch.setattr(embedding, "_model", None)
+    with pytest.raises(ImportError, match=r"ezmm\[embed\]"):
+        embed_sequences(["Some text."])
+    # Sequences of items only need no model
+    assert embed_sequences([MultimodalSequence(embedded_images[0])])[0].shape == (DEFAULT_DIM,)
+
+
+@requires_embed
+def test_embed_sequences_with_model():
+    roses = Image("in/roses.jpg")
+    sequences = [MultimodalSequence("The image", roses, "shows roses."), "A blossoming red rose.", "Tax report."]
+    for seq, result in zip(sequences, embed_sequences(sequences)):
+        seq = seq if isinstance(seq, MultimodalSequence) else MultimodalSequence(seq)
+        assert np.dot(result, seq.embedding) > 0.999

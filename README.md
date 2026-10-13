@@ -93,6 +93,8 @@ Text is truncated to fit into the model's context of 8,192 tokens (shared with t
 
 For many items, use the bulk functions (also used by `python -m ezmm embed`): `embed_registry()` embeds all items of the registry that are not embedded yet, and `embed_files([(path, kind), ...])` embeds any files. They decode files in parallel threads while the model embeds the previously decoded files in batches of the same modality, which is several times faster than embedding items one by one.
 
+To embed many sequences, use `embed_sequences(sequences, dim=None)`. It returns the same embeddings as `seq.embedding` (one per sequence, in order; strings are turned into sequences), but embeds the texts of all sequences in batches instead of one model call per sequence. A sequence that cannot be embedded (e.g., an empty one) gets its exception instead of an embedding, so one failure does not abort the whole batch. Item embeddings are taken from the registry, so embed the items in bulk first (`embed_registry()`).
+
 ### Embedding size and search index
 | Setting                | Function                                | Environment variable  | Default                     |
 |------------------------|-----------------------------------------|-----------------------|-----------------------------|
